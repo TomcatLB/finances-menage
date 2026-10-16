@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  issues: write   # reminders are posted as a GitHub issue (GitHub emails the owner)
 
 concurrency:
   group: prices
@@ -31,3 +32,13 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      - name: Reminders (private values to update, renewals, RRSP deadline)
+        if: always()
+        continue-on-error: true
+        run: python scripts/reminders.py
+        working-directory: .
+        env:
+          PYTHONPATH: scripts
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
