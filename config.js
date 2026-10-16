@@ -3,6 +3,6 @@
 // (supabase/schema.sql) are what keep the data private.
 // NEVER put the secret / service_role key here.
 window.APP_CONFIG = {
-  SUPABASE_URL: 'https://YOUR-PROJECT-REF.supabase.co',
-  SUPABASE_KEY: 'YOUR-PUBLISHABLE-OR-ANON-KEY',
+  SUPABASE_URL: 'https://tbxycqszzecnimihvcbm.supabase.co',
+  SUPABASE_KEY: 'sb_publishable_JAhWuQwQ4GzXNqcyQTAH0Q_TB9z6AqU',
 };
