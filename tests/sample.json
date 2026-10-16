@@ -1,0 +1,26 @@
+{
+  "holdings": [
+    { "symbol": "XEQT", "market": "TSX", "currency": "CAD", "qty": 120.5, "avg_cost": 31.2, "owner": "p1" },
+    { "symbol": "vfv", "market": "TSX", "currency": "CAD", "qty": 40, "avg_cost": 110, "owner": "p2" },
+    { "symbol": "AAPL", "market": "US", "currency": "USD", "qty": 12, "avg_cost": 180, "owner": "joint" },
+    { "symbol": "BAM.A", "market": "TSX", "currency": "CAD", "qty": 30, "avg_cost": 50, "owner": "p1" },
+    { "symbol": "FONDS-DESJ", "market": "MANUAL", "currency": "CAD", "qty": 500, "avg_cost": 10, "manual_price": 11.37, "owner": "p2" },
+    { "symbol": "CRYPTO", "market": "MANUAL", "currency": "USD", "qty": 0.1, "avg_cost": 60000, "manual_price": null, "owner": "p1" },
+    { "symbol": "CAD", "market": "CASH", "currency": "CAD", "qty": 1520.33, "avg_cost": null, "owner": "joint" },
+    { "symbol": "USD", "market": "CASH", "currency": "USD", "qty": 200, "avg_cost": null, "owner": null }
+  ],
+  "prices": {
+    "TSX:XEQT": { "close": 45.62, "prev_close": 46.14, "price_date": "2026-10-14" },
+    "TSX:VFV": { "close": 160.1, "prev_close": 159.0, "price_date": "2026-10-14" },
+    "US:AAPL": { "close": 342.0, "prev_close": 342.96, "price_date": "2026-10-15" },
+    "FX:USDCAD": { "close": 1.4263, "prev_close": 1.4222, "price_date": "2026-10-14" }
+  },
+  "assets": [
+    { "name": "Maison", "kind": "Résidence principale", "value": 650000, "owner": "joint" },
+    { "name": "Auto", "kind": "Véhicule", "value": 18000, "owner": "p2" }
+  ],
+  "debts": [
+    { "name": "Hypothèque", "kind": "mortgage", "balance": 412345.67, "rate": 4.59, "rate_type": "fixed", "payment": 2310, "freq": "monthly", "owner": "joint" },
+    { "name": "Marge", "kind": "loc", "balance": 3200, "rate": 9.2, "payment": 150, "freq": "monthly", "owner": "p1" }
+  ]
+}
