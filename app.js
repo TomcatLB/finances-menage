@@ -17,7 +17,7 @@
     TSXV: { label: 'TSX croissance', cur: 'CAD', auto: true },
     NEO: { label: 'Cboe Canada (ex-NEO)', cur: 'CAD', auto: true },
     US: { label: 'NYSE / Nasdaq (É.-U.)', cur: 'USD', auto: true },
-    MANUAL: { label: 'Prix entré à la main (fonds commun, crypto…)', cur: null, auto: false },
+    MANUAL: { label: 'Placement privé ou prix entré à la main (fonds commun, crypto…)', cur: null, auto: false },
     CASH: { label: 'Encaisse dans le compte', cur: null, auto: false },
   };
   const ACCOUNTS = ['CELI', 'REER', 'CELIAPP', 'REEE', 'FERR', 'CRI / FRV', 'Non enregistré', 'Société', 'Autre'];
@@ -36,7 +36,8 @@
   const SAVINGS_GROUP = 'Épargne et placements';
   const DEBT_FREQS = Object.fromEntries(Object.entries(FREQS).filter(([k]) => k !== 'yearly').map(([k, v]) => [k, v.label]));
   const ALL_FREQS = Object.fromEntries(Object.entries(FREQS).map(([k, v]) => [k, v.label]));
-  const TABS = [['portfolio', 'Portfolio'], ['actifs', 'Actifs'], ['budget', 'Budget'], ['enfants', 'Enfants'], ['dettes', 'Dettes'], ['projets', 'Projets']];
+  const TABS = [['portfolio', 'Portfolio'], ['actifs', 'Actifs'], ['budget', 'Budget'], ['enfants', 'Enfants'], ['dettes', 'Dettes'], ['projets', 'Projets'],
+    ['compagnies', 'Compagnies'], ['projections', 'Projections']];
 
   const S = {
     session: null,
@@ -47,7 +48,8 @@
     who: storeGet('who', 'all'),
     tab: TABS.some(([t]) => t === location.hash.slice(1)) ? location.hash.slice(1) : 'portfolio',
     range: storeGet('range', '1y'),
-    loaded: false, denied: false, loadError: null,
+    companies: [], company_items: [], transactions: [], contributions: [],
+    loaded: false, denied: false, loadError: null, outdated: false,
   };
 
   // ---------------------------------------------------------------------------
@@ -128,12 +130,23 @@
     const m = (e && (e.message || e.error_description)) || String(e);
     if (/row-level security|permission denied/i.test(m)) return "Ce compte n'a pas accès à ces données.";
     if (/Failed to fetch|NetworkError/i.test(m)) return 'Connexion impossible. Vérifie ta connexion Internet.';
+    if (/column .* does not exist|Could not find the .* column/i.test(m)) return 'La base de données doit être mise à jour : dans Supabase, relance le fichier supabase/schema.sql (SQL Editor → Run).';
     return m;
   }
 
   // ---------------------------------------------------------------------------
   // Data
   // ---------------------------------------------------------------------------
+  // Tables added after the first version: if the database has not been updated yet (schema.sql not run again),
+  // the app still loads and shows a notice instead of failing.
+  const OPTIONAL_TABLES = {
+    companies: () => sb.from('companies').select('*').order('created_at'),
+    company_items: () => sb.from('company_items').select('*').order('created_at'),
+    transactions: () => sb.from('transactions').select('*').order('trade_date', { ascending: false }).limit(5000),
+    contributions: () => sb.from('contributions').select('*').order('entry_date'),
+  };
+  const missingTable = (e) => /does not exist|Could not find the table|PGRST205|42P01/i.test((e && (e.message || e.code)) || '');
+
   async function loadAll() {
     const results = await Promise.all([
       sb.from('settings').select('*').eq('id', 1).maybeSingle(),
@@ -148,7 +161,8 @@
       sb.from('projects').select('*').order('created_at'),
       sb.from('expense_log').select('*').order('spend_date', { ascending: false }).limit(5000),
     ]);
-    const err = results.find((r) => r.error);
+    const extra = await Promise.all(Object.values(OPTIONAL_TABLES).map((q) => q()));
+    const err = results.find((r) => r.error) || extra.find((r) => r.error && !missingTable(r.error));
     if (err) { S.loadError = errText(err.error); S.loaded = true; return; }
     const [st, ho, pr, as, de, bu, sn, ch, re, pj, lg] = results.map((r) => r.data);
     S.loadError = null;
@@ -164,6 +178,9 @@
     S.resp = re || [];
     S.projects = pj || [];
     S.log = lg || [];
+    Object.keys(OPTIONAL_TABLES).forEach((k, i) => { S[k] = extra[i].data || []; });
+    // New columns in settings are the other sign of an older database.
+    S.outdated = extra.some((r) => r.error) || (st && !('projection' in st));
     S.loaded = true;
   }
 
@@ -282,8 +299,11 @@
         h('strong', { text: "Ce compte n'a pas accès" }),
         h('p', { text: `${S.session.user.email} ne fait pas partie de la liste des membres du ménage. Ajoute ce courriel à la table allowed_users dans Supabase.` })));
     }
-    const panel = { portfolio: renderPortfolio, actifs: renderActifs, budget: renderBudget, enfants: renderEnfants, dettes: renderDettes, projets: renderProjets }[S.tab]();
-    app.replaceChildren(header(), summary(), tabs(), panel);
+    const panel = { portfolio: renderPortfolio, actifs: renderActifs, budget: renderBudget, enfants: renderEnfants, dettes: renderDettes, projets: renderProjets,
+      compagnies: renderCompagnies, projections: renderProjections }[S.tab]();
+    const notice = S.outdated ? h('div', { class: 'banner' },
+      'Nouveautés à activer : dans Supabase, ouvre SQL Editor, colle le fichier supabase/schema.sql (avec vos deux courriels) et clique Run. Vos données restent intactes.') : null;
+    app.replaceChildren(header(), summary(), notice || '', tabs(), panel);
   }
 
   function header() {
@@ -299,6 +319,7 @@
       h('div', null, h('h1', { text: 'Finances du ménage' }), h('p', { class: 'sub', text: parts.join(' · ') || 'Les prix se mettent à jour chaque soir de bourse.' })),
       h('div', { class: 'top-actions' },
         S.loaded && !S.denied && !S.loadError ? who : null,
+        S.loaded && !S.denied && !S.loadError ? h('button', { class: 'btn ghost', type: 'button', onclick: exportAll, text: 'Exporter', title: 'Toutes les données dans un fichier Excel' }) : null,
         S.loaded && !S.denied ? h('button', { class: 'btn ghost', type: 'button', onclick: openSettings, text: 'Réglages' }) : null,
         h('button', { class: 'btn ghost', type: 'button', onclick: () => sb.auth.signOut(), text: 'Déconnexion' })));
   }
@@ -352,15 +373,20 @@
     if (!S.holdings.length) {
       root.append(h('section', { class: 'card empty' },
         h('strong', { text: 'Aucun placement pour l’instant' }),
-        h('p', { text: 'Ajoute chaque titre que vous détenez (FNB, actions, fonds) avec son compte. Les prix se mettent à jour automatiquement chaque soir de bourse.' }),
-        addBtn('Ajouter un placement', () => openHolding())));
+        h('p', { text: 'Ajoute chaque titre que vous détenez (FNB, actions, fonds) avec son compte, ou importe tout le portefeuille d’un coup depuis un fichier Excel, un CSV ou un lien Google Sheets. Les prix des placements publics se mettent à jour chaque soir de bourse.' }),
+        h('div', { class: 'card-actions' },
+          addBtn('Importer un portefeuille', () => openHoldingsImport('public')),
+          h('button', { class: 'btn', type: 'button', onclick: () => openHolding(), text: 'Ajouter un placement' }),
+          h('button', { class: 'btn', type: 'button', onclick: () => openHolding(null, { market: 'MANUAL' }), text: 'Ajouter un placement privé' }))));
       return root;
     }
+    const due = S.holdings.filter((hd) => isPrivate(hd) && sh(hd.owner) && privateDue(hd));
     const banners = [];
     const staleDays = p.oldestClose ? Math.floor((Date.now() - new Date(p.oldestClose + 'T16:00:00')) / 86400000) : null;
     if (staleDays !== null && staleDays > 4) banners.push(`Certains prix datent du ${fmtDate(p.oldestClose)}. Vérifie que la mise à jour quotidienne (GitHub Actions) roule toujours.`);
     if (p.atCost) banners.push(`${p.atCost} placement(s) sans prix encore : ils sont comptés au coût jusqu'à la prochaine mise à jour.`);
     if (p.missingFx) banners.push(`${p.missingFx} placement(s) en USD exclus : le taux USD/CAD n'est pas encore disponible.`);
+    if (due.length) banners.push(`${due.length} placement(s) privé(s) à mettre à jour : ${due.map((hd) => hd.name || hd.symbol).join(', ').replace(/\.$/, '')}.`);
     for (const b of banners) root.append(h('div', { class: 'banner', text: b }));
 
     root.append(card('Rendement', p.lastClose ? `Au prix de clôture du ${fmtDate(p.lastClose)}` : 'Valeurs actuelles', null,
@@ -387,15 +413,20 @@
       card('Par titre', null, null, bars(top, p.mv, 'muted'))));
 
     const sorted = [...p.rows].sort((a, b) => (b.mv ?? -1) * b.f - (a.mv ?? -1) * a.f);
-    const body = sorted.map((r) => {
+    const pub = sorted.filter((r) => !isPrivate(r.h));
+    const priv = sorted.filter((r) => isPrivate(r.h));
+    const sum = (rows) => rows.reduce((a, r) => a + (r.mv === null ? 0 : r.mv * r.f), 0);
+    const open = (hd) => ({ class: 'click', tabindex: '0', onclick: () => openHolding(hd), onkeydown: (e) => { if (e.key === 'Enter') openHolding(hd); } });
+    const sharePct = (v) => h('span', { class: 'sub', text: v !== null && p.mv > 0 ? fmtPct.format(v / p.mv) : '' });
+
+    const pubBody = pub.map((r) => {
       const hd = r.h;
       const shown = r.mv === null ? null : r.mv * r.f;
       const gain = r.mv === null ? null : (r.mv - r.cost) * r.f;
       let priceNote;
       if (r.src === 'close') priceNote = fmtDate(r.date, { day: 'numeric', month: 'short' });
-      else if (r.src === 'manual') priceNote = 'manuel' + (r.date ? ' · ' + fmtDate(r.date, { day: 'numeric', month: 'short' }) : '');
       else if (r.src === 'cost') priceNote = h('span', { class: 'pill warn', text: 'au coût' });
-      return h('tr', { class: 'click', tabindex: '0', onclick: () => openHolding(hd), onkeydown: (e) => { if (e.key === 'Enter') openHolding(hd); } },
+      return h('tr', open(hd),
         h('td', null,
           hd.market === 'CASH' ? h('span', { class: 'ticker', text: 'ENCAISSE' }) : h('span', { class: 'ticker', text: hd.symbol.toUpperCase() }),
           ' ', hd.currency === 'USD' ? h('span', { class: 'pill info', text: 'USD' }) : null,
@@ -403,17 +434,302 @@
         h('td', { class: 'r hide-sm' }, hd.market === 'CASH' ? '—' : fmtQty.format(num(hd.qty))),
         h('td', { class: 'r hide-sm' }, hd.market === 'CASH' ? '—' : native(num(hd.avg_cost), hd.currency)),
         h('td', { class: 'r' }, hd.market === 'CASH' ? '—' : native(r.px, hd.currency), h('span', { class: 'sub' }, hd.market === 'CASH' ? null : priceNote)),
-        h('td', { class: 'r' }, shown === null ? '—' : money(shown), h('span', { class: 'sub', text: shown !== null && p.mv > 0 ? fmtPct.format(shown / p.mv) : '' })),
+        h('td', { class: 'r' }, shown === null ? '—' : money(shown), sharePct(shown)),
         h('td', { class: 'r ' + cls(gain || 0) }, gain === null || hd.market === 'CASH' ? '—' : moneySigned(gain),
           h('span', { class: 'sub', text: gain !== null && r.cost > 0 && hd.market !== 'CASH' ? fmtPctS.format((r.mv - r.cost) / r.cost) : '' })));
     });
-    root.append(card('Positions', 'Clique sur une ligne pour la modifier.', [addBtn('Ajouter un placement', () => openHolding())],
-      h('div', { class: 'table-wrap' }, h('table', null,
+    const pubLink = !!S.settings.public_sheet_url;
+    root.append(card('Placements publics', pub.length ? `${pub.length} position(s) · ${money(sum(pub))} · cours de clôture mis à jour chaque soir de bourse` : 'Actions, FNB et encaisse : le cours se met à jour chaque soir de bourse.',
+      [h('button', { class: 'btn', type: 'button', onclick: () => openHoldingsImport('public'), text: pubLink ? 'Mettre à jour (Google Sheets)' : 'Importer' }),
+        addBtn('Ajouter un placement', () => openHolding())],
+      pub.length ? h('div', { class: 'table-wrap' }, h('table', null,
         h('thead', null, h('tr', null, h('th', { text: 'Titre' }), h('th', { class: 'r hide-sm', text: 'Quantité' }), h('th', { class: 'r hide-sm', text: 'Coût moyen' }),
           h('th', { class: 'r', text: 'Cours' }), h('th', { class: 'r', text: 'Valeur (CAD)' }), h('th', { class: 'r', text: 'Gain / perte' }))),
-        h('tbody', null, body))),
-      h('p', { class: 'footnote', text: 'Le coût des titres en USD est converti au taux du jour. Pour l’impôt, le prix de base rajusté utilise le taux de la date d’achat.' })));
+        h('tbody', null, pubBody))) : h('p', { class: 'footnote', text: 'Aucun placement public. Importe un relevé de ton courtier (Excel ou CSV) ou ajoute les titres un à un.' }),
+      pub.length ? h('p', { class: 'footnote', text: 'Clique sur une ligne pour la modifier. Le coût des titres en USD est converti au taux du jour; pour l’impôt, le prix de base rajusté utilise le taux de la date d’achat.' }) : null));
+
+    const privBody = priv.map((r) => {
+      const hd = r.h;
+      const shown = r.mv === null ? null : r.mv * r.f;
+      const gain = r.mv === null || hd.avg_cost === null || hd.avg_cost === undefined ? null : (r.mv - r.cost) * r.f;
+      const late = privateDue(hd);
+      return h('tr', open(hd),
+        h('td', null,
+          h('strong', { text: hd.name || hd.symbol }), ' ', hd.currency === 'USD' ? h('span', { class: 'pill info', text: 'USD' }) : null,
+          late ? h('span', { class: 'pill warn', text: 'à mettre à jour' }) : null,
+          h('span', { class: 'sub', text: [hd.account, ownerName(hd.owner) + (r.f < 1 ? ' (50 %)' : ''), hd.institution, FREQ_LABEL[hd.update_freq]].filter(Boolean).join(' · ') })),
+        h('td', { class: 'r' }, shown === null ? '—' : money(shown),
+          h('span', { class: 'sub' }, r.src === 'manual' ? (r.date ? 'au ' + fmtDate(r.date) : '') : h('span', { class: 'pill warn', text: 'au coût' }))),
+        h('td', { class: 'r hide-sm' }, gain === null ? '—' : money(r.cost * r.f)),
+        h('td', { class: 'r ' + cls(gain || 0) }, gain === null ? '—' : moneySigned(gain),
+          h('span', { class: 'sub', text: gain !== null && r.cost > 0 ? fmtPctS.format((r.mv - r.cost) / r.cost) : '' })));
+    });
+    const privLink = !!S.settings.private_sheet_url;
+    root.append(card('Placements privés', priv.length ? `${priv.length} placement(s) · ${money(sum(priv))} · valeur entrée à la main ou importée` : 'Fonds privés, actions d’une compagnie, prêts privés, immobilier en parts… mis à jour chaque mois ou trimestre.',
+      [h('button', { class: 'btn', type: 'button', onclick: () => openHoldingsImport('private'), text: privLink ? 'Mettre à jour (Google Sheets)' : 'Importer / mettre à jour' }),
+        addBtn('Ajouter un placement privé', () => openHolding(null, { market: 'MANUAL' }))],
+      priv.length ? h('div', { class: 'table-wrap' }, h('table', null,
+        h('thead', null, h('tr', null, h('th', { text: 'Placement' }), h('th', { class: 'r', text: 'Valeur (CAD)' }), h('th', { class: 'r hide-sm', text: 'Investi' }),
+          h('th', { class: 'r', text: 'Gain / perte' }))),
+        h('tbody', null, privBody))) : h('p', { class: 'footnote', text: 'Aucun placement privé. Ajoute-les un à un, ou importe une feuille avec une ligne par placement (nom, valeur, montant investi, date).' }),
+      priv.length ? h('p', { class: 'footnote', text: 'Pour mettre à jour : clique sur une ligne, ou importe une nouvelle version du fichier ou du lien. Les lignes reconnues sont mises à jour, les nouvelles sont ajoutées.' }) : null));
+    if (!S.outdated) root.append(allocationCard(p), tradesCard(), roomCard());
     return root;
+  }
+  // --- Asset allocation ---------------------------------------------------------
+  const CLASSES = { equity: 'Actions', bond: 'Obligations', cash: 'Encaisse', real_estate: 'Immobilier', other: 'Autre' };
+  const CLASS_COLORS = { equity: 'var(--accent)', bond: 'var(--gain)', cash: 'var(--muted)', real_estate: 'var(--warn)', other: 'var(--loss)' };
+  // Common Canadian all-in-one and single-class ETFs. Anything else listed on a market counts as stocks.
+  const ETF_MIX = (() => {
+    const m = {};
+    const put = (list, mix) => list.split(' ').forEach((t) => { m[t] = mix; });
+    put('XEQT VEQT ZEQT HEQT TEQT', { equity: 1 });
+    put('XGRO VGRO ZGRO TGRO', { equity: 0.8, bond: 0.2 });
+    put('XBAL VBAL ZBAL TBAL', { equity: 0.6, bond: 0.4 });
+    put('XCNS VCNS ZCON', { equity: 0.4, bond: 0.6 });
+    put('XINC VCIP ZINC', { equity: 0.2, bond: 0.8 });
+    put('ZAG XBB VAB ZDB XSB VSB ZFL XQB ZCPB HBB QBB XSH ZSB VSC ZST', { bond: 1 });
+    put('CASH PSA ZMMK HSAV CBIL HISA MNY CSAV UMMF', { cash: 1 });
+    put('ZRE XRE VRE CGR', { real_estate: 1 });
+    return m;
+  })();
+  /** How a holding splits across asset classes: the class chosen for it, else the ETF list, else by market. */
+  function holdingMix(hd) {
+    if (hd.asset_class && CLASSES[hd.asset_class]) return { [hd.asset_class]: 1 };
+    if (hd.market === 'CASH') return { cash: 1 };
+    if (hd.market === 'MANUAL') return { other: 1 };
+    return ETF_MIX[String(hd.symbol || '').toUpperCase()] || { equity: 1 };
+  }
+
+  function allocationCard(p) {
+    const totals = Object.fromEntries(Object.keys(CLASSES).map((k) => [k, 0]));
+    for (const r of p.rows) {
+      if (r.mv === null) continue;
+      for (const [k, w] of Object.entries(holdingMix(r.h))) totals[k] += r.mv * r.f * w;
+    }
+    const total = Object.values(totals).reduce((a, b) => a + b, 0);
+    if (!(total > 0)) return '';
+    const targets = S.settings.allocation_targets || null;
+    const rows = Object.entries(CLASSES).filter(([k]) => totals[k] > 0.5 || (targets && num(targets[k]) > 0)).map(([k, label]) => {
+      const cur = totals[k] / total;
+      const tgt = targets ? num(targets[k]) / 100 : null;
+      const diff = tgt === null ? null : tgt * total - totals[k];
+      return h('div', { class: 'alloc-row' },
+        h('div', { class: 'name', text: label }),
+        h('div', { class: 'bar-track' },
+          h('div', { class: 'bar-fill', style: `width:${(cur * 100).toFixed(2)}%; background:${CLASS_COLORS[k]}` }),
+          tgt !== null ? h('div', { class: 'target-mark', style: `left:${(tgt * 100).toFixed(2)}%`, title: `Cible ${fmtPct.format(tgt)}` }) : null),
+        h('div', { class: 'amt' }, `${fmtPct.format(cur)}`, h('small', { text: money(totals[k]) })),
+        diff === null ? null : h('div', { class: 'amt ' + (Math.abs(diff) < total * 0.01 ? '' : diff > 0 ? 'up' : 'down') },
+          Math.abs(diff) < total * 0.01 ? 'à la cible' : `${diff > 0 ? 'acheter' : 'vendre'} ${money(Math.abs(diff))}`, h('small', { text: `cible ${fmtPct.format(tgt)}` })));
+    });
+    return card('Répartition des actifs', targets ? 'Actuelle (barre) et cible (trait), avec ce qu’il faut acheter ou vendre pour revenir à la cible' : 'Selon le type de chaque placement (les FNB tout-en-un sont répartis selon leur composition)',
+      [h('button', { class: 'btn', type: 'button', onclick: openTargets, text: targets ? 'Modifier la cible' : 'Fixer une cible' })],
+      h('div', { class: 'alloc' }, rows),
+      h('p', { class: 'footnote', text: 'Clique sur un placement pour changer sa catégorie. Les placements privés comptent dans « Autre » tant qu’on ne leur donne pas de catégorie. Pour rééquilibrer sans impôt, privilégie les nouveaux dépôts et les comptes CELI ou REER.' }));
+  }
+
+  function openTargets() {
+    const t = S.settings.allocation_targets || { equity: 80, bond: 20, cash: 0, real_estate: 0, other: 0 };
+    openForm({
+      title: 'Répartition cible (%)',
+      values: { ...t },
+      fields: Object.entries(CLASSES).map(([k, label]) => ({ k, label, type: 'num' })),
+      onSave: async (out) => {
+        const clean = Object.fromEntries(Object.keys(CLASSES).map((k) => [k, out[k] || 0]));
+        const sum = Object.values(clean).reduce((a, b) => a + b, 0);
+        if (Math.abs(sum - 100) > 0.5) throw new Error(`Le total doit faire 100 % (présentement ${fmtYears.format(sum)} %).`);
+        const res = await sb.from('settings').update({ allocation_targets: clean }).eq('id', 1);
+        if (res.error) throw res.error;
+      },
+    });
+  }
+
+  // --- Buys, sells and realized gains ------------------------------------------
+  const TAX_SHELTERED = ['CELI', 'REER', 'CELIAPP', 'REEE', 'FERR', 'CRI / FRV'];
+  const INCLUSION = 0.5; // capital gains inclusion rate
+  const fxNow = () => num((S.prices['FX:USDCAD'] || {}).close) || null;
+
+  function tradesCard() {
+    const year = new Date().getFullYear();
+    const mine = S.transactions.filter((t) => sh(t.owner));
+    const sells = mine.filter((t) => t.kind === 'sell' && t.realized_gain !== null && t.realized_gain !== undefined);
+    const byYear = new Map();
+    for (const t of sells) {
+      const y = Number(String(t.trade_date).slice(0, 4));
+      const e = byYear.get(y) || { taxable: 0, sheltered: 0, company: 0 };
+      const g = num(t.realized_gain) * sh(t.owner);
+      if (TAX_SHELTERED.includes(t.account)) e.sheltered += g; else if (t.account === 'Société') e.company += g; else e.taxable += g;
+      byYear.set(y, e);
+    }
+    const cur = byYear.get(year) || { taxable: 0, sheltered: 0, company: 0 };
+    const kindLabel = { buy: 'Achat', sell: 'Vente' };
+    const list = mine.slice(0, 15).map((t) => clickRow(() => openTrade(t),
+      h('td', null, `${kindLabel[t.kind]} ${t.symbol}`, h('span', { class: 'sub', text: [t.account, ownerName(t.owner), fmtDate(t.trade_date)].filter(Boolean).join(' · ') })),
+      h('td', { class: 'r' }, `${fmtQty.format(num(t.qty))} × ${native(num(t.price), t.currency)}`, h('span', { class: 'sub', text: num(t.fees) ? `frais ${native(num(t.fees), t.currency)}` : '' })),
+      h('td', { class: 'r ' + (t.kind === 'sell' ? cls(num(t.realized_gain)) : '') }, t.kind === 'sell' ? moneySigned(num(t.realized_gain)) : '—',
+        h('span', { class: 'sub', text: t.kind === 'sell' ? (TAX_SHELTERED.includes(t.account) ? 'à l’abri' : t.account === 'Société' ? 'dans la compagnie' : 'imposable') : '' }))));
+    return card('Transactions et gains réalisés', 'Un achat ou une vente met à jour la quantité et le coût moyen du placement', [addBtn('Acheter ou vendre', () => openTrade())],
+      h('div', { class: 'kpis' },
+        kpi(`Gains imposables ${year}`, h('span', { class: cls(cur.taxable), text: moneySigned(cur.taxable) }), cur.taxable > 0 ? `${money(cur.taxable * INCLUSION)} à déclarer (50 %)` : 'comptes non enregistrés'),
+        kpi('Dans les comptes à l’abri', moneySigned(cur.sheltered), 'CELI, REER… : pas d’impôt'),
+        cur.company ? kpi('Dans la compagnie', moneySigned(cur.company), 'imposé dans la compagnie') : null,
+        [...byYear.keys()].filter((y) => y !== year).length ? kpi('Années précédentes', moneySigned([...byYear.entries()].filter(([y]) => y !== year).reduce((a, [, e]) => a + e.taxable, 0)), 'gains imposables') : null),
+      list.length ? h('div', { class: 'table-wrap' }, h('table', null,
+        h('thead', null, h('tr', null, h('th', { text: 'Transaction' }), h('th', { class: 'r', text: 'Quantité × prix' }), h('th', { class: 'r', text: 'Gain réalisé' }))),
+        h('tbody', null, list))) : h('p', { class: 'footnote', text: 'Aucune transaction. Les ventes calculent le gain ou la perte selon le coût moyen (prix de base rajusté).' }),
+      h('p', { class: 'footnote', text: 'Gain = produit de la vente moins les frais, moins le coût moyen × la quantité vendue. Titres en USD : converti au taux du jour de la transaction (approximatif : pour l’impôt, le coût se calcule au taux de chaque achat). Attention aux pertes apparentes (rachat dans les 30 jours). Ton relevé de courtier (T5008) fait foi.' }));
+  }
+
+  /** Records a buy or a sell and updates the holding. Editing an existing one only changes its note and date. */
+  function openTrade(t) {
+    if (t) {
+      return openForm({
+        title: `${t.kind === 'buy' ? 'Achat' : 'Vente'} de ${t.symbol}`,
+        values: { trade_date: t.trade_date, note: t.note },
+        fields: [
+          { k: 'trade_date', label: 'Date', type: 'date' },
+          { k: 'note', label: 'Note', type: 'text', wide: true, hint: 'Supprimer une transaction ne change pas le placement : corrige la quantité ou le coût dans le placement lui-même.' },
+        ],
+        onSave: (out) => saveRow('transactions', { id: t.id, ...out }),
+        onDelete: () => deleteRow('transactions', t.id),
+      });
+    }
+    const choices = { '': 'Nouveau titre…' };
+    for (const hd of S.holdings.filter((x) => x.market !== 'CASH')) choices[hd.id] = `${hd.market === 'MANUAL' ? hd.name || hd.symbol : hd.symbol} · ${hd.account} · ${ownerName(hd.owner)}`;
+    const firstId = Object.keys(choices)[1] || '';
+    const marketOpts = Object.fromEntries(Object.entries(MARKETS).filter(([k]) => k !== 'CASH').map(([k, m]) => [k, m.label]));
+    openForm({
+      title: 'Acheter ou vendre',
+      values: { holding: firstId, kind: 'buy', trade_date: todayISO(), market: 'TSX', account: 'CELI', owner: S.who === 'all' ? 'p1' : S.who, fx_rate: fxNow() ? String(fxNow()).replace('.', ',') : '' },
+      fields: [
+        { k: 'holding', label: 'Placement', type: 'select', options: choices, wide: true },
+        { k: 'kind', label: 'Opération', type: 'select', options: { buy: 'Achat', sell: 'Vente' }, show: (s) => !!s.holding, clearWhenHidden: false },
+        { k: 'symbol', label: 'Symbole', type: 'text', upper: true, req: true, show: (s) => !s.holding, placeholder: 'XEQT' },
+        { k: 'market', label: 'Marché', type: 'select', options: marketOpts, show: (s) => !s.holding },
+        { k: 'account', label: 'Compte', type: 'select', options: ACCOUNTS, show: (s) => !s.holding },
+        { k: 'owner', label: 'Propriétaire', type: 'owner', show: (s) => !s.holding },
+        { k: 'trade_date', label: 'Date', type: 'date' },
+        { k: 'qty', label: 'Quantité', type: 'num', req: true },
+        { k: 'price', label: 'Prix par part', type: 'num', req: true, hint: 'Dans la devise du titre' },
+        { k: 'fees', label: 'Frais (facultatif)', type: 'num' },
+        { k: 'fx_rate', label: 'Taux USD/CAD ce jour-là', type: 'num', show: (s) => {
+          const hd = S.holdings.find((x) => x.id === s.holding);
+          return hd ? hd.currency === 'USD' : s.market === 'US';
+        } },
+        { k: 'note', label: 'Note (facultatif)', type: 'text', wide: true },
+      ],
+      onSave: async (out) => {
+        const qty = out.qty, price = out.price, fees = out.fees || 0;
+        if (!(qty > 0)) throw new Error('La quantité doit être plus grande que zéro.');
+        let hd = S.holdings.find((x) => x.id === out.holding) || null;
+        const kind = hd ? out.kind : 'buy';
+        const currency = hd ? hd.currency : MARKETS[out.market].cur || 'CAD';
+        const fx = currency === 'USD' ? (out.fx_rate || fxNow() || 1) : 1;
+        const base = { trade_date: out.trade_date || todayISO(), kind, qty, price, fees, currency, fx_rate: currency === 'USD' ? fx : null, note: out.note };
+        if (!hd) {
+          const row = { market: out.market, symbol: out.symbol, currency, qty, avg_cost: (qty * price + fees) / qty, account: out.account, owner: out.owner };
+          if (out.market === 'MANUAL') { row.manual_price = price; row.manual_price_date = base.trade_date; }
+          const r = await sb.from('holdings').insert(row).select();
+          if (r.error) throw r.error;
+          const created = Array.isArray(r.data) ? r.data[0] : r.data;
+          await saveRow('transactions', { ...base, holding_id: created ? created.id : null, symbol: out.symbol, account: out.account, owner: out.owner });
+          return;
+        }
+        const q = num(hd.qty), avg = num(hd.avg_cost);
+        const tx = { ...base, holding_id: hd.id, symbol: hd.market === 'MANUAL' ? hd.name || hd.symbol : hd.symbol, account: hd.account, owner: hd.owner };
+        if (kind === 'buy') {
+          const upd = { qty: q + qty, avg_cost: (q * avg + qty * price + fees) / (q + qty) };
+          if (hd.market === 'MANUAL') { upd.manual_price = price; upd.manual_price_date = base.trade_date; }
+          await saveRow('holdings', { id: hd.id, ...upd });
+          await saveRow('transactions', tx);
+          return;
+        }
+        if (qty > q + 1e-9) throw new Error(`Tu ne détiens que ${fmtQty.format(q)} parts de ce placement.`);
+        tx.acb_per_unit = avg * fx;
+        tx.realized_gain = Math.round(((qty * price - fees) * fx - qty * avg * fx) * 100) / 100;
+        await saveRow('transactions', tx);
+        if (q - qty < 1e-9) await deleteRow('holdings', hd.id); // all sold
+        else await saveRow('holdings', { id: hd.id, qty: q - qty });
+      },
+    });
+  }
+
+  // --- CELI / REER room ---------------------------------------------------------
+  const PLAN_LABEL = { CELI: 'CELI', REER: 'REER' };
+  /** Room left for one person and plan in a year, from the room entered and the movements of that year. */
+  function roomStatus(owner, plan, year) {
+    const rows = S.contributions.filter((c) => c.owner === owner && c.plan === plan && Number(c.year) === year);
+    const roomRow = rows.filter((c) => c.kind === 'room').at(-1);
+    const sum = (k) => rows.filter((c) => c.kind === k).reduce((t, c) => t + num(c.amount), 0);
+    const room = roomRow ? num(roomRow.amount) : null;
+    const contributed = sum('contribution'), withdrawn = sum('withdrawal');
+    const left = room === null ? null : room - contributed;
+    const next = plan === 'CELI' && left !== null ? left + withdrawn + T().PARAMS.tfsaLimit : null;
+    return { room, contributed, withdrawn, left, next };
+  }
+
+  function roomCard() {
+    const year = new Date().getFullYear();
+    const people = S.who === 'all' ? ['p1', 'p2'] : S.who === 'joint' ? [] : [S.who];
+    const block = (owner, plan) => {
+      const st = roomStatus(owner, plan, year);
+      const over = st.left !== null && st.left < (plan === 'REER' ? -2000 : 0);
+      const used = st.room ? Math.min(1, st.contributed / st.room) : 0;
+      return h('div', { class: 'room' },
+        h('div', { class: 'room-top' }, h('strong', { text: `${PLAN_LABEL[plan]} · ${ownerName(owner)}` }),
+          h('button', { class: 'btn ghost', type: 'button', onclick: () => openContribution(null, { owner, plan, year }), text: '+ Mouvement' })),
+        st.room === null
+          ? h('p', { class: 'footnote' }, 'Droits pas encore entrés. ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); openContribution(null, { owner, plan, year, kind: 'room' }); },
+            text: plan === 'CELI' ? 'Entre tes droits au 1er janvier' : 'Entre ton maximum déductible' }),
+            plan === 'CELI' ? ' (Mon dossier de l’ARC).' : ' (avis de cotisation de l’ARC).')
+          : h('div', null,
+            h('div', { class: 'big' + (over ? ' down' : ''), text: money(st.left) }),
+            h('div', { class: 'muted-caption', text: over ? 'cotisation excédentaire : pénalité de 1 % par mois' : `encore permis en ${year}` }),
+            h('div', { class: 'progress' + (over ? ' over' : ''), role: 'progressbar', 'aria-valuenow': Math.round(used * 100), 'aria-valuemin': 0, 'aria-valuemax': 100 }, h('div', { style: `width:${(used * 100).toFixed(1)}%` })),
+            h('div', { class: 'footnote', style: 'margin-top:4px', text: `${money(st.contributed)} cotisé sur ${money(st.room)}${st.withdrawn ? ` · ${money(st.withdrawn)} retiré` : ''}` }),
+            st.next !== null ? h('div', { class: 'footnote', text: `Au 1er janvier ${year + 1} : environ ${money(st.next)} (retraits de ${year} + ${money(T().PARAMS.tfsaLimit)} de nouveaux droits)` }) : null));
+    };
+    const recent = S.contributions.filter((c) => people.includes(c.owner)).slice().sort((a, b) => String(b.entry_date).localeCompare(String(a.entry_date))).slice(0, 8);
+    const kindLabel = { room: 'Droits', contribution: 'Cotisation', withdrawal: 'Retrait' };
+    return card(`Droits de cotisation ${year}`, 'CELI et REER de chacun, d’après les montants de l’ARC et vos mouvements', null,
+      people.length ? h('div', { class: 'rooms' }, people.flatMap((p) => [block(p, 'CELI'), block(p, 'REER')])) : h('p', { class: 'footnote', text: 'Choisis une personne en haut pour voir ses droits.' }),
+      recent.length ? h('div', { class: 'table-wrap' }, h('table', null, h('tbody', null, recent.map((c) => clickRow(() => openContribution(c),
+        h('td', null, `${kindLabel[c.kind]} ${PLAN_LABEL[c.plan]}`, h('span', { class: 'sub', text: `${ownerName(c.owner)} · année ${c.year}${c.note ? ' · ' + c.note : ''}` })),
+        h('td', { class: 'r' }, (c.kind === 'withdrawal' ? '− ' : '') + money(num(c.amount)), h('span', { class: 'sub', text: fmtDate(c.entry_date) }))))))) : null,
+      h('p', { class: 'footnote', text: `REER : une cotisation faite dans les 60 premiers jours de l’année peut compter pour l’année d’avant (choisis l’année dans le formulaire); 2 000 $ d’excédent sont tolérés. CELI : un retrait redonne les droits seulement le 1er janvier suivant. Nouveaux droits CELI ${year} : ${money(T().PARAMS.tfsaLimit)}; plafond REER ${year} : ${money(T().PARAMS.rrspLimit)}.` }));
+  }
+
+  function openContribution(c, preset = {}) {
+    const year = new Date().getFullYear();
+    const v = c ? { ...c, year: String(c.year) } : { owner: 'p1', plan: 'CELI', kind: 'contribution', year: String(year), entry_date: todayISO(), ...preset };
+    if (!c && preset.year) v.year = String(preset.year);
+    openForm({
+      title: c ? 'Modifier' : v.kind === 'room' ? 'Entrer les droits' : 'Ajouter un mouvement',
+      values: v,
+      fields: [
+        { k: 'owner', label: 'Personne', type: 'select', options: { p1: S.settings.p1_name, p2: S.settings.p2_name } },
+        { k: 'plan', label: 'Régime', type: 'select', options: PLAN_LABEL },
+        { k: 'kind', label: 'Type', type: 'select', options: (s) => (s.plan === 'CELI' ? { contribution: 'Cotisation', withdrawal: 'Retrait', room: 'Droits au 1er janvier' } : { contribution: 'Cotisation', room: 'Maximum déductible (avis de cotisation)' }) },
+        { k: 'year', label: 'Année visée', type: 'select', options: () => [String(year + 1), String(year), String(year - 1)] },
+        { k: 'amount', label: 'Montant', type: 'num', req: true },
+        { k: 'entry_date', label: 'Date', type: 'date' },
+        { k: 'note', label: 'Note (facultatif)', type: 'text', wide: true, placeholder: 'Wealthsimple, virement automatique…' },
+      ],
+      onSave: (out) => saveRow('contributions', { ...out, id: c && c.id, year: Number(out.year), entry_date: out.entry_date || todayISO() }),
+      onDelete: c ? () => deleteRow('contributions', c.id) : null,
+    });
+  }
+
+  const isPrivate = (hd) => hd.market === 'MANUAL';
+  const FREQ_LABEL = { monthly: 'chaque mois', quarterly: 'chaque trimestre' };
+  const FREQ_DAYS = { monthly: 35, quarterly: 100 }; // a little slack past the month or quarter
+  /** A private holding whose value is older than its update rhythm. */
+  function privateDue(hd) {
+    const limit = FREQ_DAYS[hd.update_freq];
+    if (!limit) return false;
+    const d = hd.manual_price_date || String(hd.updated_at || '').slice(0, 10);
+    return !d || (Date.now() - new Date(d + 'T12:00:00')) / 86400000 > limit;
   }
   function kpi(label, value, note) {
     return h('div', { class: 'kpi' }, h('div', { class: 'label', text: label }), h('div', { class: 'value' }, value), note ? h('div', { class: 'note' }, note) : null);
@@ -517,10 +833,14 @@
     return measureCtx.measureText(t).width;
   }
 
-  function lineChart(box, pts, series) {
+  /**
+   * series: [{ name, color, get, area?, width?, dash? }] and bands: [{ name, color, lo, hi }] (shaded range).
+   * opts: { label (aria), dateLabel(p) for the tooltip, years: true for a yearly x axis }.
+   */
+  function lineChart(box, pts, series, bands = [], opts = {}) {
     const W = Math.max(280, Math.round(box.clientWidth || 600));
     const H = Math.round(Math.min(320, Math.max(220, W * 0.4)));
-    const vals = pts.flatMap((p) => series.map((sr) => sr.get(p)));
+    const vals = pts.flatMap((p) => [...series.map((sr) => sr.get(p)), ...bands.flatMap((b) => [b.lo(p), b.hi(p)])]);
     const ticks = niceTicks(Math.min(0, ...vals), Math.max(...vals), 4);
     const labels = ticks.map((v) => fmtC.format(v));
     const ml = Math.ceil(Math.max(...labels.map(textWidth))) + 12, mr = 14, mt = 10, mb = 28;
@@ -528,7 +848,7 @@
     const x = (t) => ml + ((t - t0) / (t1 - t0)) * (W - ml - mr);
     const y0 = ticks[0], y1 = ticks.at(-1);
     const y = (v) => mt + (1 - (v - y0) / (y1 - y0)) * (H - mt - mb);
-    const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, width: '100%', role: 'img', 'aria-label': 'Évolution de l’avoir net' });
+    const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, width: '100%', role: 'img', 'aria-label': opts.label || 'Évolution de l’avoir net' });
     const gid = 'g' + Math.random().toString(36).slice(2, 8);
     svg.append(s('defs', null, s('linearGradient', { id: gid, x1: 0, y1: 0, x2: 0, y2: 1 },
       [[0, 0.22], [0.5, 0.08], [1, 0]].map(([o, a]) => s('stop', { offset: o, style: `stop-color: var(--accent); stop-opacity: ${a}` })))));
@@ -537,7 +857,7 @@
       svg.append(s('text', { x: ml - 8, y: y(v) + 4, 'text-anchor': 'end' }, labels[i]));
     });
     const spanDays = (t1 - t0) / 86400000;
-    const dfmt = spanDays > 200 ? { month: 'short', year: '2-digit' } : { day: 'numeric', month: 'short' };
+    const dfmt = opts.years || spanDays > 3 * 365 ? { year: 'numeric' } : spanDays > 200 ? { month: 'short', year: '2-digit' } : { day: 'numeric', month: 'short' };
     const nx = Math.max(2, Math.min(5, Math.floor((W - ml - mr) / 90)));
     let lastRight = -Infinity;
     for (let i = 0; i < nx; i++) {
@@ -551,10 +871,15 @@
       lastRight = left + w;
       svg.append(s('text', { x: cx, y: H - 8, 'text-anchor': anchor }, label));
     }
+    for (const b of bands) {
+      const top = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(b.hi(p)).toFixed(1)}`).join('');
+      const bottom = [...pts].reverse().map((p) => `L${x(p.t).toFixed(1)},${y(b.lo(p)).toFixed(1)}`).join('');
+      svg.append(s('path', { d: top + bottom + 'Z', style: `fill:${b.color}; opacity: 0.16`, stroke: 'none' }));
+    }
     for (const sr of series) {
       const d = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(sr.get(p)).toFixed(1)}`).join('');
       if (sr.area) svg.append(s('path', { d: `${d}L${x(t1).toFixed(1)},${y(Math.max(y0, 0))}L${x(t0).toFixed(1)},${y(Math.max(y0, 0))}Z`, fill: `url(#${gid})`, stroke: 'none' }));
-      svg.append(s('path', { d, fill: 'none', style: `stroke:${sr.color}`, 'stroke-width': sr.width, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+      svg.append(s('path', { d, fill: 'none', style: `stroke:${sr.color}`, 'stroke-width': sr.width, 'stroke-dasharray': sr.dash || null, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
     }
     const last = pts.at(-1);
     svg.append(s('circle', { cx: x(last.t), cy: y(series[0].get(last)), r: 4, style: 'fill: var(--accent); stroke: var(--surface); stroke-width: 2' }));
@@ -576,8 +901,9 @@
       hl.setAttribute('x1', cx); hl.setAttribute('x2', cx);
       series.forEach((sr, i) => { dots[i].setAttribute('cx', cx); dots[i].setAttribute('cy', y(sr.get(p))); });
       hover.setAttribute('visibility', 'visible');
-      tip.replaceChildren(h('div', { class: 'd', text: fmtDate(p.date) }),
-        ...series.map((sr) => h('div', { class: 'row', style: `--c:${sr.color}`, text: `${sr.name} ${money(sr.get(p))}` })));
+      tip.replaceChildren(h('div', { class: 'd', text: opts.dateLabel ? opts.dateLabel(p) : fmtDate(p.date) }),
+        ...series.map((sr) => h('div', { class: 'row', style: `--c:${sr.color}`, text: `${sr.name} ${money(sr.get(p))}` })),
+        ...bands.map((b) => h('div', { class: 'row', style: `--c:${b.color}`, text: `${b.name} ${money(b.lo(p))} à ${money(b.hi(p))}` })));
       tip.hidden = false;
       const scale = rect.width / W;
       const tw = tip.offsetWidth;
@@ -916,6 +1242,363 @@
   // ---------------------------------------------------------------------------
   const ownerOptions = () => ({ p1: S.settings.p1_name, p2: S.settings.p2_name, joint: 'Commun (50 / 50)' });
 
+  // --- Projections -------------------------------------------------------------
+  const PROJ_FIELDS = [
+    ['ret', 'Rendement %'], ['sd', 'Écart-type %'], ['infl', 'Inflation %'], ['realEstate', 'Immobilier %'],
+    ['raise_p1', (st) => `Hausse de ${st.p1_name} %`], ['raise_p2', (st) => `Hausse de ${st.p2_name} %`], ['kids', 'Coûts des enfants %'], ['endYear', 'Année de fin'],
+  ];
+  const RETIRE_FIELDS = [
+    ['birth_p1', (st) => `Naissance de ${st.p1_name} (année)`], ['birth_p2', (st) => `Naissance de ${st.p2_name} (année)`],
+    ['retire_p1', (st) => `Retraite de ${st.p1_name} (âge)`], ['retire_p2', (st) => `Retraite de ${st.p2_name} (âge)`],
+    ['rrq_p1', (st) => `RRQ de ${st.p1_name} à 65 ans ($/mois)`], ['rrq_p2', (st) => `RRQ de ${st.p2_name} à 65 ans ($/mois)`],
+    ['psv', 'PSV par personne ($/mois)'], ['retireSpend', 'Dépenses à la retraite (% d’avant)'], ['retireTax', 'Impôt moyen à la retraite %'],
+  ];
+  function projAssumptions() {
+    const a = { ...window.Projection.DEFAULTS, ...(S.settings.projection || {}) };
+    // Until an end year is chosen: to the younger person's 90th birthday, or 25 years.
+    if (!a.endYear) a.endYear = a.birth_p1 && a.birth_p2 ? Math.max(a.birth_p1, a.birth_p2) + 90 : new Date().getFullYear() + 25;
+    return a;
+  }
+
+  /** Today's household numbers in the shape projection.js expects. */
+  function projectionStart() {
+    const year = new Date().getFullYear();
+    const yearOf = (iso) => (iso ? Number(String(iso).slice(0, 4)) : null);
+    const kids = S.children.map((c) => ({ c, end: yearOf(c.birth_date) !== null ? yearOf(c.birth_date) + 18 : null }));
+    const lastChildYear = kids.length ? Math.max(...kids.map((k) => k.end ?? year)) : null;
+    let invested = 0;
+    for (const hd of S.holdings) {
+      if (hd.child_id) continue;
+      const v = C.valueHolding(hd, S.prices).mv;
+      if (v !== null) invested += v;
+    }
+    const resp = kids.map(({ c, end }) => {
+      const linked = linkedValue('child_id', c.id);
+      return { value: linked.count ? linked.value : num(c.resp_value), endYear: end ?? year + 10 };
+    });
+    const sumKinds = (kinds) => S.assets.filter((a) => kinds.includes(a.kind)).reduce((t, a) => t + num(a.value), 0);
+    const debts = S.debts.map((d) => ({ balance: num(d.balance), payment: C.effectivePayment(d).payment, periods: (FREQS[d.freq] || FREQS.monthly).n, rate: C.periodRate(d) }));
+    const incomes = [], expenses = [];
+    for (const b of S.budget) {
+      const annual = C.monthly(b.amount, b.freq) * 12;
+      if (b.kind === 'income') {
+        if (b.grp === 'Revenus de placement') continue; // already in the investment return
+        incomes.push({ annual, owner: b.owner, kind: b.grp === 'Allocations familiales' ? 'allowance' : b.grp === 'Autre revenu' ? 'other' : 'work' });
+      } else {
+        if (b.grp === SAVINGS_GROUP) continue; // savings, not spending
+        const child = b.child_id ? kids.find((k) => k.c.id === b.child_id) : null;
+        if (child || isChildGroup(b.grp)) expenses.push({ annual, kind: 'child', endYear: child ? child.end : lastChildYear });
+        else expenses.push({ annual, kind: 'regular', endYear: null });
+      }
+    }
+    const projects = S.projects.filter((p) => p.target_date && yearOf(p.target_date) >= year).map((p) => ({ year: yearOf(p.target_date), amount: num(p.target_amount) }));
+    return {
+      year, invested, resp, debts, incomes, expenses, projects, lastChildYear,
+      realEstate: sumKinds(['Résidence principale', 'Immeuble locatif', 'Chalet']),
+      vehicles: sumKinds(['Véhicule']), pension: sumKinds(['Fonds de pension']), flat: sumKinds(['Compte bancaire', 'Entreprise', 'Autre']),
+    };
+  }
+
+  let projSaveTimer;
+  function renderProjections() {
+    const root = h('div', { role: 'tabpanel', 'aria-labelledby': 'tab-projections' });
+    const a = projAssumptions();
+    const real = storeGet('projReal', '1') === '1';
+    const start = projectionStart();
+    const res = window.Projection.project(start, a);
+    const year0 = start.year;
+    const defl = (row, v) => (real ? v / Math.pow(1 + a.infl / 100, row.year - year0) : v);
+    const retirementOn = !!(a.birth_p1 && a.birth_p2);
+
+    // Assumptions: edits redraw at once and are saved a moment later.
+    const input = ([k, label]) => {
+      const id = 'proj-' + k;
+      return h('div', { class: 'field' }, h('label', { for: id, text: typeof label === 'function' ? label(S.settings) : label }),
+        h('input', { id, inputmode: 'decimal', autocomplete: 'off', value: a[k] === null || a[k] === undefined ? '' : String(a[k]).replace('.', ','),
+          onchange: (e) => {
+            const v = parseNum(e.target.value);
+            const next = { ...(S.settings.projection || {}) };
+            if (v === null || Number.isNaN(v)) delete next[k]; else next[k] = v;
+            S.settings = { ...S.settings, projection: next };
+            const y = window.scrollY;
+            render();
+            window.scrollTo(0, y);
+            clearTimeout(projSaveTimer);
+            projSaveTimer = setTimeout(async () => {
+              const r = await sb.from('settings').update({ projection: next }).eq('id', 1);
+              if (r.error) toast(errText(r.error), true);
+            }, 500);
+          } }));
+    };
+    root.append(card('Hypothèses', 'Change un chiffre : tout se recalcule. Rendements et hausses en % par année.', [
+      h('div', { class: 'seg', role: 'group', 'aria-label': 'Afficher en' },
+        [['1', 'Dollars d’aujourd’hui'], ['0', 'Dollars de l’époque']].map(([k, l]) => h('button', { type: 'button', 'aria-pressed': String((real ? '1' : '0') === k),
+          onclick: () => { storeSet('projReal', k); render(); }, text: l })))],
+    h('div', { class: 'fields proj' }, PROJ_FIELDS.map(input)),
+    h('h3', { class: 'subhead', text: 'Retraite' }),
+    h('div', { class: 'fields proj' }, RETIRE_FIELDS.map(input)),
+    h('p', { class: 'footnote', text: 'RRQ : ton estimation à 65 ans est dans Mon dossier (Retraite Québec); le maximum en 2026 est 1 507,65 $ par mois. Elle est ajustée selon l’âge de retraite (−0,6 % par mois avant 65 ans, +0,7 % après, de 60 à 72 ans). PSV dès 65 ans (maximum 762,50 $ par mois fin 2026).' })));
+
+    const last = res.central.at(-1);
+    const lastBand = res.band.at(-1);
+    const retireYear = retirementOn ? Math.max(a.birth_p1 + a.retire_p1, a.birth_p2 + a.retire_p2) : null;
+    const atRetire = retireYear ? res.central.find((r) => r.year === retireYear) : null;
+    const debtFree = res.central.find((r) => r.debt <= 0);
+    const kpis = h('div', { class: 'kpis' },
+      kpi(`Avoir net en ${last.year}`, money(defl(last, last.netWorth)), `${money(defl(last, lastBand.nwLow))} à ${money(defl(last, lastBand.nwHigh))} (9 fois sur 10 au-dessus de la borne basse)`),
+      atRetire ? kpi(`Placements à la retraite (${retireYear})`, money(defl(atRetire, atRetire.invested)), 'Scénario central') : kpi('Placements', money(defl(last, last.invested)), `en ${last.year}, scénario central`),
+      retirementOn ? kpi('L’argent dure jusqu’à la fin', h('span', { class: res.success >= 0.85 ? 'up' : res.success < 0.6 ? 'down' : '' , text: fmtPct.format(res.success) }), `des ${res.runs} simulations`) : null,
+      kpi('Dettes payées', debtFree ? String(debtFree.year) : 'après ' + last.year, start.debts.length ? 'selon les paiements actuels' : 'aucune dette'));
+    const chartBox = h('div', { class: 'chart' });
+    root.append(card('Placements et avoir net', `Scénario central et fourchette pessimiste–optimiste (${res.runs} simulations de marché)`, null, kpis, chartBox,
+      h('div', { class: 'legend' },
+        h('span', { style: '--c: var(--accent)', text: 'Avoir net (central)' }), h('span', { style: '--c: var(--gain)', text: 'Placements (central)' }),
+        h('span', { class: 'band', style: '--c: var(--accent)', text: 'Avoir net : 10 % pessimiste à 90 % optimiste' }))));
+
+    // A row every 5 years, plus retirement and the last year.
+    const milestones = res.central.filter((r, i) => i === 0 || r.year % 5 === 0 || r.year === retireYear || i === res.central.length - 1);
+    const ages = (r) => [r.age.p1, r.age.p2].filter((x) => x !== null).join(' / ');
+    root.append(card('Année par année', real ? 'En dollars d’aujourd’hui' : 'En dollars de l’époque', null,
+      h('div', { class: 'table-wrap' }, h('table', null,
+        h('thead', null, h('tr', null, h('th', { text: 'Année' }), h('th', { class: 'r hide-sm', text: 'Revenus nets' }), h('th', { class: 'r hide-sm', text: 'Dépenses et dettes' }),
+          h('th', { class: 'r', text: 'Épargne' }), h('th', { class: 'r', text: 'Placements' }), h('th', { class: 'r', text: 'Avoir net' }))),
+        h('tbody', null, milestones.map((r) => h('tr', null,
+          h('td', null, String(r.year), h('span', { class: 'sub', text: (ages(r) ? 'âges ' + ages(r) : '') + (r.retired.p1 || r.retired.p2 ? ' · retraite' : '') })),
+          h('td', { class: 'r hide-sm' }, money(defl(r, r.work + r.pensions))),
+          h('td', { class: 'r hide-sm' }, money(defl(r, r.spend + r.debtPaid))),
+          h('td', { class: 'r ' + cls(r.surplus) }, moneySigned(defl(r, r.surplus))),
+          h('td', { class: 'r' }, money(defl(r, r.invested))),
+          h('td', { class: 'r' }, money(defl(r, r.netWorth))))))))));
+
+    const notes = ['Revenus du Budget (nets d’impôt) qui augmentent selon la hausse de chacun et s’arrêtent à la retraite; dépenses indexées à l’inflation, celles des enfants à leur taux et jusqu’à 18 ans; lignes « Épargne et placements » comptées comme épargne.',
+      'Dettes remboursées selon leurs paiements actuels (le renouvellement au même taux); placements des projets dépensés à leur date; REEE dépensés aux 18 ans de l’enfant.',
+      'Rendements de marché aléatoires (loi log-normale) autour du rendement moyen; maison selon le taux immobilier; véhicules −15 % par année.',
+      'Non modélisé : impôt sur les placements non enregistrés, retraits obligatoires du FERR, héritages, changements de vie. C’est un ordre de grandeur pour décider, pas une promesse.'];
+    if (!retirementOn) root.prepend(h('div', { class: 'banner', text: 'Entre vos deux années de naissance (section Retraite) pour inclure la retraite, la RRQ et la PSV dans la projection.' }));
+    if (res.depleted) root.prepend(h('div', { class: 'banner', text: `Dans le scénario central, les placements sont épuisés en ${res.depleted}.` }));
+    root.append(h('div', { class: 'footnote' }, notes.map((n) => h('p', { text: n }))));
+
+    requestAnimationFrame(() => {
+      const pts = res.central.map((r, i) => ({ t: new Date(r.year, 6, 1).getTime(), year: r.year, nw: defl(r, r.netWorth), inv: defl(r, r.invested),
+        lo: defl(r, res.band[i].nwLow), hi: defl(r, res.band[i].nwHigh) }));
+      lineChart(chartBox, pts,
+        [{ name: 'Avoir net', color: 'var(--accent)', get: (p) => p.nw, width: 2.5 }, { name: 'Placements', color: 'var(--gain)', get: (p) => p.inv, width: 2 }],
+        [{ name: 'Fourchette', color: 'var(--accent)', lo: (p) => p.lo, hi: (p) => p.hi }],
+        { label: 'Projection de l’avoir net', years: true, dateLabel: (p) => String(p.year) });
+    });
+    return root;
+  }
+
+  // --- Compagnies ---------------------------------------------------------------
+  const CO_INCOME = ['Ventes et honoraires', 'Subventions', 'Autre revenu'];
+  const CO_EXPENSE = {
+    'Loyer et bureau': 100, 'Matériel et équipement': 100, 'Logiciels et abonnements': 100, 'Téléphone et Internet': 100,
+    'Véhicule et déplacements': 100, 'Repas et représentation': 50, 'Publicité et marketing': 100, 'Honoraires professionnels': 100,
+    'Assurances': 100, 'Frais bancaires et intérêts': 100, 'Formation': 100, 'Sous-traitance': 100, 'Salaires d’employés': 100, 'Autre dépense': 100,
+  };
+  const CO_KIND = { inc: 'Société incorporée (inc.)', autonome: 'Travailleur autonome' };
+  const T = () => window.Tax;
+  const taxSettings = () => ({ p1_job: 0, p2_job: 0, p1_other: 0, p2_other: 0, cnesst: null, ...(S.settings.tax || {}) });
+  /** Each person's income outside the companies, as a personalTax input. */
+  const personBase = (p) => { const t = taxSettings(); return { employment: num(t[p + '_job']), other: num(t[p + '_other']) }; };
+  const coLines = (c) => S.company_items.filter((i) => i.company_id === c.id)
+    .map((i) => ({ ...i, annual: C.monthly(i.amount, i.freq) * 12, deductiblePct: num(i.deductible_pct) }));
+  const owners = (c) => (c.owner === 'joint' ? [['p1', 0.5], ['p2', 0.5]] : [[c.owner, 1]]);
+
+  /** A company's year, plus the personal tax its payouts cause for each owner (marginal, on top of their other income). */
+  function companyView(c) {
+    const X = T();
+    const opts = { cnesstRate: taxSettings().cnesst != null ? num(taxSettings().cnesst) / 100 : undefined };
+    const lines = coLines(c);
+    const y = X.companyYear(c, lines, { salary: num(c.salary), dividends: num(c.dividends) }, opts);
+    let personal = 0;
+    for (const [p, part] of owners(c)) {
+      const extra = c.kind === 'autonome' ? { selfEmployed: y.profit * part } : { employment: y.salary * part, nonEligibleDiv: y.dividends * part };
+      personal += X.extraTax(personBase(p), extra);
+    }
+    const pocket = c.kind === 'autonome' ? y.available - personal : y.salary + y.dividends - personal;
+    const scenarios = c.kind === 'inc' && y.available > 0
+      ? X.payoutScenarios(c, lines, { salary: num(c.salary), dividends: num(c.dividends) }, c.owner === 'joint' ? personBase('p1') : personBase(c.owner), opts) : null;
+    return { c, lines, y, personal, pocket, scenarios };
+  }
+
+  function renderCompagnies() {
+    const root = h('div', { role: 'tabpanel', 'aria-labelledby': 'tab-compagnies' });
+    if (S.outdated) {
+      root.append(h('section', { class: 'card empty' }, h('strong', { text: 'Base de données à mettre à jour' }),
+        h('p', { text: 'Pour activer les compagnies, relance le fichier supabase/schema.sql dans Supabase (SQL Editor → Run). Vos données restent intactes.' })));
+      return root;
+    }
+    const list = S.companies.filter((c) => sh(c.owner));
+    if (!list.length) {
+      root.append(h('section', { class: 'card empty' },
+        h('strong', { text: 'Aucune compagnie' }),
+        h('p', { text: 'Ajoute ta compagnie (incorporée ou travailleur autonome), ses revenus et ses dépenses : l’app estime l’impôt de la compagnie, l’impôt personnel sur ce que vous vous versez, et ce qui reste vraiment dans vos poches.' }),
+        h('div', { class: 'card-actions' }, addBtn('Ajouter une compagnie', () => openCompany()),
+          h('button', { class: 'btn', type: 'button', onclick: openTaxSettings, text: 'Vos autres revenus' }))));
+      return root;
+    }
+    const views = list.map(companyView);
+    const share = (c) => sh(c.owner);
+    const tot = views.reduce((a, v) => {
+      const f = share(v.c);
+      a.rev += v.y.revenue * f; a.exp += v.y.expenses * f; a.pocket += v.pocket * f;
+      a.tax += ((v.y.corpTax ? v.y.corpTax.total : 0) + v.personal + (v.y.employer ? v.y.employer.total : 0)) * f;
+      a.kept += (v.y.retained || 0) * f;
+      return a;
+    }, { rev: 0, exp: 0, pocket: 0, tax: 0, kept: 0 });
+    root.append(card('Vue d’ensemble', 'Par année, selon les montants entrés', [
+      h('button', { class: 'btn', type: 'button', onclick: openTaxSettings, text: 'Vos autres revenus' }),
+      addBtn('Ajouter une compagnie', () => openCompany())],
+    h('div', { class: 'kpis' },
+      kpi('Revenus', money(tot.rev), `${money(tot.rev / 12)} / mois`),
+      kpi('Dépenses', money(tot.exp), `${money(tot.exp / 12)} / mois`),
+      kpi('Impôts et charges', money(tot.tax), tot.rev - tot.exp > 0 ? `${fmtPct.format(tot.tax / (tot.rev - tot.exp))} du profit` : null),
+      kpi('Dans vos poches', h('span', { class: cls(tot.pocket), text: money(tot.pocket) }), `${money(tot.pocket / 12)} / mois, après impôts`))));
+
+    for (const v of views) root.append(companyCard(v));
+    root.append(h('p', { class: 'footnote', text: `Estimations ${T().PARAMS.year} pour le Québec, à titre indicatif : impôt fédéral et québécois, RRQ, RQAP, Fonds des services de santé et CNESST. Non pris en compte : crédits remboursables et familiaux, amortissement fiscal (DPA), impôt minimum, revenus de placement de la compagnie, acomptes. Valide les chiffres avec ton comptable avant de décider.` }));
+    return root;
+  }
+
+  function companyCard(v) {
+    const { c, y, lines, personal, pocket, scenarios } = v;
+    const inc = c.kind === 'inc';
+    const pct = (a, b) => (b > 0 ? ` (${fmtPct.format(a / b)})` : '');
+    const flow = inc ? [
+      fact('Revenus', money(y.revenue)),
+      fact('Dépenses', '− ' + money(y.expenses)),
+      fact('Salaire versé', '− ' + money(y.salary)),
+      fact('Charges sur le salaire', '− ' + money(y.employer.total)),
+      fact('Profit imposable', money(y.taxable)),
+      fact('Impôt de la compagnie', '− ' + money(y.corpTax.total) + (y.taxable > 0 ? pct(y.corpTax.total, y.taxable) : '')),
+      fact('Dividendes versés', '− ' + money(y.dividends)),
+      fact('Reste dans la compagnie', h('span', { class: cls(y.retained), text: money(y.retained) })),
+    ] : [
+      fact('Revenus', money(y.revenue)),
+      fact('Dépenses', '− ' + money(y.expenses)),
+      fact('Profit d’entreprise', money(y.profit)),
+      fact('Impôt et cotisations', '− ' + money(personal) + pct(personal, y.profit)),
+    ];
+    const personalFacts = inc ? [
+      fact('Versé à vous', money(y.salary + y.dividends)),
+      fact('Impôt personnel et RRQ/RQAP', '− ' + money(personal)),
+      fact('Dans vos poches', h('strong', { class: cls(pocket), text: `${money(pocket)} (${money(pocket / 12)} / mois)` })),
+    ] : [fact('Dans vos poches', h('strong', { class: cls(pocket), text: `${money(pocket)} (${money(pocket / 12)} / mois)` }))];
+
+    const rows = [...lines].sort((a, b) => (a.kind === b.kind ? b.annual - a.annual : a.kind === 'income' ? -1 : 1)).map((l) => clickRow(() => openCompanyItem(c, l),
+      h('td', null, l.name, h('span', { class: 'sub', text: l.grp + (l.kind === 'expense' && l.deductiblePct < 100 ? ` · déductible à ${fmtYears.format(l.deductiblePct)} %` : '') })),
+      h('td', { class: 'r ' + (l.kind === 'income' ? 'up' : '') }, (l.kind === 'income' ? '' : '− ') + money(l.annual / 12), h('span', { class: 'sub', text: '/ mois' })),
+      h('td', { class: 'r hide-sm' }, money(l.annual), h('span', { class: 'sub', text: '/ an' }))));
+
+    let compare = null;
+    if (scenarios) {
+      // Only the two ways that empty the company are comparable; what stays inside is still taxed when it comes out.
+      const best = Math.max(scenarios[0].pocket, scenarios[1].pocket);
+      compare = h('div', null, h('h3', { class: 'subhead', text: 'Salaire ou dividendes?' }),
+        h('div', { class: 'table-wrap' }, h('table', null,
+          h('thead', null, h('tr', null, h('th', { text: 'Façon de se payer' }), h('th', { class: 'r', text: 'Dans vos poches' }), h('th', { class: 'r hide-sm', text: 'Impôts et charges' }), h('th', { class: 'r', text: 'Reste dans la cie' }))),
+          h('tbody', null, scenarios.map((s2) => h('tr', null,
+            h('td', null, s2.label, h('span', { class: 'sub', text: `salaire ${money(s2.salary)} · dividendes ${money(s2.dividends)}` })),
+            h('td', { class: 'r' }, money(s2.pocket), s2 !== scenarios[2] && Math.abs(s2.pocket - best) < 1 ? h('span', { class: 'sub' }, h('span', { class: 'pill ok', text: 'le plus payant' })) : null),
+            h('td', { class: 'r hide-sm' }, money(s2.totalTax)),
+            h('td', { class: 'r' }, money(s2.retained))))))),
+        h('p', { class: 'footnote', text: 'Même argent disponible, versé de trois façons. Le salaire donne aussi droit au RRQ et crée des droits REER; les dividendes n’en donnent pas. L’argent laissé dans la compagnie sera imposé quand il sortira.' }));
+    }
+
+    const budgetName = `Revenu net – ${c.name}`;
+    const inBudget = S.budget.find((b) => b.name === budgetName);
+    const monthlyPocket = Math.round(Math.max(0, pocket) / 12);
+    const syncBtn = h('button', { class: 'btn', type: 'button', text: inBudget ? `Mettre à jour le Budget (${money(monthlyPocket)} / mois)` : `Ajouter au Budget (${money(monthlyPocket)} / mois)`,
+      onclick: async () => {
+        try {
+          await saveRow('budget_items', { id: inBudget && inBudget.id, name: budgetName, grp: 'Travail autonome', kind: 'income', nature: 'fixed', amount: monthlyPocket, freq: 'monthly', owner: c.owner, child_id: null });
+          toast('Budget mis à jour'); refresh();
+        } catch (e) { toast(errText(e), true); }
+      } });
+
+    return h('section', { class: 'card' },
+      h('div', { class: 'card-head' },
+        h('div', null, h('h2', { text: c.name }), h('p', { text: [CO_KIND[c.kind], ownerName(c.owner), inc ? (c.sbd_hours ? 'taux réduit au Québec (5 500 h)' : 'taux du Québec sans les 5 500 h') : null].filter(Boolean).join(' · ') })),
+        h('div', { class: 'actions' },
+          h('button', { class: 'btn ghost', type: 'button', onclick: () => openCompany(c), text: 'Modifier' }),
+          h('button', { class: 'btn', type: 'button', onclick: () => openCompanyItem(c, { kind: 'expense' }), text: 'Dépense' }),
+          addBtn('Revenu', () => openCompanyItem(c, { kind: 'income' })))),
+      h('div', { class: 'grid tight' },
+        h('div', null, h('h3', { class: 'subhead', text: inc ? 'Dans la compagnie (par année)' : 'Par année' }), h('dl', { class: 'facts' }, flow)),
+        h('div', null, h('h3', { class: 'subhead', text: 'Pour vous' }), h('dl', { class: 'facts' }, personalFacts),
+          h('div', { class: 'card-actions' }, syncBtn),
+          h('p', { class: 'footnote', text: 'Le Budget et les Projections utilisent ce montant net. Mets-le à jour quand les chiffres changent.' }))),
+      lines.length ? h('div', null, h('h3', { class: 'subhead', text: 'Revenus et dépenses' }), h('div', { class: 'table-wrap' }, h('table', null,
+        h('thead', null, h('tr', null, h('th', { text: 'Ligne' }), h('th', { class: 'r', text: 'Par mois' }), h('th', { class: 'r hide-sm', text: 'Par année' }))),
+        h('tbody', null, rows))))
+        : h('p', { class: 'footnote', text: 'Ajoute les revenus (ventes, honoraires) et les dépenses (loyer, matériel, logiciels…) de la compagnie.' }),
+      compare);
+  }
+
+  function openCompany(c) {
+    const v = c ? { ...c, sbd_hours: c.sbd_hours ? 'oui' : 'non' } : { kind: 'inc', owner: S.who === 'all' ? 'p1' : S.who, sbd_hours: 'non', salary: '', dividends: '' };
+    openForm({
+      title: c ? 'Modifier la compagnie' : 'Ajouter une compagnie',
+      values: v,
+      fields: [
+        { k: 'name', label: 'Nom', type: 'text', req: true, wide: true, placeholder: 'Studio Photo inc.' },
+        { k: 'kind', label: 'Forme', type: 'select', options: CO_KIND },
+        { k: 'owner', label: 'Propriétaire', type: 'owner' },
+        { k: 'salary', label: 'Salaire versé (brut, par année)', type: 'num', show: (s) => s.kind === 'inc', clearWhenHidden: true, hint: 'Ce que la compagnie vous verse en salaire' },
+        { k: 'dividends', label: 'Dividendes versés (par année)', type: 'num', show: (s) => s.kind === 'inc', clearWhenHidden: true, hint: 'Dividendes ordinaires (non déterminés)' },
+        { k: 'sbd_hours', label: 'Heures rémunérées dans l’année', type: 'select', show: (s) => s.kind === 'inc', wide: true,
+          options: { non: 'Moins de 5 500 h (une ou deux personnes) : taux du Québec 11,5 %', oui: '5 500 h ou plus : taux réduit du Québec 3,2 %' },
+          hint: 'Heures payées aux employés (40 h/semaine max par personne). Le taux réduit du Québec baisse à 2,2 % pour les années qui commencent après le 29 avril 2026.' },
+        { k: 'note', label: 'Note (facultatif)', type: 'text', wide: true },
+      ],
+      onSave: (out) => saveRow('companies', { ...out, id: c && c.id, salary: out.salary || 0, dividends: out.dividends || 0, sbd_hours: out.sbd_hours === 'oui' }),
+      onDelete: c ? () => deleteRow('companies', c.id) : null,
+    });
+  }
+
+  function openCompanyItem(c, item) {
+    const existing = item && item.id;
+    const kind = item.kind || 'expense';
+    const groups = kind === 'income' ? CO_INCOME : Object.keys(CO_EXPENSE);
+    const v = existing ? { ...item } : { kind, grp: groups[0], freq: 'monthly', deductible_pct: kind === 'income' ? 100 : CO_EXPENSE[groups[0]] };
+    openForm({
+      title: existing ? 'Modifier la ligne' : kind === 'income' ? `Revenu de ${c.name}` : `Dépense de ${c.name}`,
+      values: v,
+      fields: [
+        { k: 'grp', label: 'Catégorie', type: 'select', options: groups, onChange: (s) => { if (kind === 'expense') s.deductible_pct = CO_EXPENSE[s.grp]; } },
+        { k: 'name', label: 'Description', type: 'text', req: true, wide: true, placeholder: kind === 'income' ? 'Contrats de photo' : 'Adobe Creative Cloud' },
+        { k: 'amount', label: 'Montant', type: 'num', req: true },
+        { k: 'freq', label: 'Fréquence', type: 'select', options: ALL_FREQS },
+        { k: 'deductible_pct', label: 'Partie déductible (%)', type: 'num', show: () => kind === 'expense', hint: 'Repas et représentation : 50 %. Usage personnel d’un bien : seulement la partie d’affaires.' },
+      ],
+      onSave: (out) => {
+        const pctVal = out.deductible_pct === null || out.deductible_pct === undefined ? 100 : Math.min(100, out.deductible_pct);
+        return saveRow('company_items', { ...out, id: existing ? item.id : undefined, company_id: c.id, kind, deductible_pct: pctVal });
+      },
+      onDelete: existing ? () => deleteRow('company_items', item.id) : null,
+    });
+  }
+
+  function openTaxSettings() {
+    const t = taxSettings();
+    openForm({
+      title: 'Vos revenus hors compagnie',
+      values: { ...t, cnesst: t.cnesst ?? T().PARAMS.cnesstDefault * 100 },
+      fields: [
+        { k: 'p1_job', label: `${S.settings.p1_name} : salaire d’un emploi (brut / an)`, type: 'num', hint: 'Un emploi ailleurs que dans vos compagnies' },
+        { k: 'p2_job', label: `${S.settings.p2_name} : salaire d’un emploi (brut / an)`, type: 'num' },
+        { k: 'p1_other', label: `${S.settings.p1_name} : autres revenus imposables (/ an)`, type: 'num', hint: 'Loyers, intérêts, pension…' },
+        { k: 'p2_other', label: `${S.settings.p2_name} : autres revenus imposables (/ an)`, type: 'num' },
+        { k: 'cnesst', label: 'Taux CNESST de la compagnie (%)', type: 'num', hint: 'Sur ton avis de cotisation CNESST; dépend du secteur' },
+      ],
+      onSave: async (out) => {
+        const res = await sb.from('settings').update({ tax: { ...t, ...out } }).eq('id', 1);
+        if (res.error) throw res.error;
+      },
+    });
+  }
+
   function openForm({ title, fields, values, onSave, onDelete }) {
     const sheet = $('#sheet');
     const state = { ...values };
@@ -1033,14 +1716,15 @@
     return o;
   }
 
-  function openHolding(hd) {
+  function openHolding(hd, preset) {
     const isNew = !hd;
-    const v = hd ? { ...hd } : { market: 'TSX', currency: 'CAD', account: 'CELI', owner: S.who === 'all' ? 'p1' : S.who };
+    const v = hd ? { ...hd } : { market: 'TSX', currency: 'CAD', account: 'CELI', owner: S.who === 'all' ? 'p1' : S.who, ...preset };
+    if (isNew && v.market === 'MANUAL') Object.assign(v, { account: 'Non enregistré', qty: '1', manual_price_date: todayISO(), update_freq: 'quarterly', ...preset });
     v.link = v.child_id ? 'child:' + v.child_id : v.project_id ? 'project:' + v.project_id : '';
     const marketOpts = Object.fromEntries(Object.entries(MARKETS).map(([k, m]) => [k, m.label]));
     const hasLinks = S.children.length || S.projects.length;
     openForm({
-      title: isNew ? 'Ajouter un placement' : 'Modifier le placement',
+      title: isNew ? (v.market === 'MANUAL' ? 'Ajouter un placement privé' : 'Ajouter un placement') : 'Modifier le placement',
       values: v,
       fields: [
         { k: 'market', label: 'Marché', type: 'select', options: marketOpts, wide: true, req: true },
@@ -1048,15 +1732,20 @@
           hint: (s) => (MARKETS[s.market]?.auto ? 'Sans suffixe : XEQT, VFV, AAPL. Actions de catégorie : BAM.A' : 'Un nom court pour t’y retrouver') },
         { k: 'currency', label: 'Devise', type: 'select', options: { CAD: 'CAD', USD: 'USD' }, show: (s) => !MARKETS[s.market]?.cur },
         { k: 'name', label: 'Nom (facultatif)', type: 'text', placeholder: 'iShares Core Equity ETF', wide: true },
-        { k: 'qty', label: (s) => (s.market === 'CASH' ? 'Montant' : 'Nombre de parts'), type: 'num', req: true },
-        { k: 'avg_cost', label: 'Coût moyen par part', type: 'num', show: (s) => s.market !== 'CASH', hint: 'Dans la devise du titre', clearWhenHidden: true },
-        { k: 'manual_price', label: 'Cours actuel', type: 'num', show: (s) => s.market === 'MANUAL', req: true, clearWhenHidden: true },
-        { k: 'manual_price_date', label: 'Date du cours', type: 'date', show: (s) => s.market === 'MANUAL', clearWhenHidden: true },
+        { k: 'qty', label: (s) => (s.market === 'CASH' ? 'Montant' : 'Nombre de parts'), type: 'num', req: true,
+          hint: (s) => (s.market === 'MANUAL' ? 'Sans parts (compagnie, prêt, immeuble) : 1, puis la valeur totale comme valeur par part' : '') },
+        { k: 'avg_cost', label: (s) => (s.market === 'MANUAL' ? 'Montant investi par part' : 'Coût moyen par part'), type: 'num', show: (s) => s.market !== 'CASH', hint: 'Dans la devise du titre', clearWhenHidden: true },
+        { k: 'manual_price', label: (s) => (s.market === 'MANUAL' ? 'Valeur actuelle par part' : 'Cours actuel'), type: 'num', show: (s) => s.market === 'MANUAL', req: true, clearWhenHidden: true },
+        { k: 'manual_price_date', label: 'Valeur en date du', type: 'date', show: (s) => s.market === 'MANUAL', clearWhenHidden: true },
+        { k: 'update_freq', label: 'Mise à jour prévue', type: 'select', options: { '': 'Aucun rappel', monthly: 'Chaque mois', quarterly: 'Chaque trimestre' },
+          show: (s) => s.market === 'MANUAL', clearWhenHidden: true, hint: 'Un rappel s’affiche quand la valeur date de plus d’un mois ou d’un trimestre.' },
         { k: 'account', label: 'Compte', type: 'select', options: ACCOUNTS },
         { k: 'owner', label: 'Propriétaire', type: 'owner' },
         { k: 'link', label: 'Associé à', type: 'select', options: linkOptions, show: () => hasLinks, wide: true,
           hint: 'Un placement du REEE compte dans la valeur du REEE de l’enfant; un placement associé à un projet compte dans ce projet.' },
         { k: 'institution', label: 'Institution (facultatif)', type: 'text', placeholder: 'Desjardins, Wealthsimple, Disnat…', wide: true },
+        { k: 'asset_class', label: 'Catégorie d’actif', type: 'select', options: { '': 'Automatique (selon le titre)', ...CLASSES }, show: (s) => s.market !== 'CASH', clearWhenHidden: true,
+          hint: 'Pour la répartition des actifs. Les FNB tout-en-un (XEQT, VBAL…) sont reconnus.' },
       ],
       onSave: async (out) => {
         const m = MARKETS[out.market];
@@ -1066,6 +1755,9 @@
         if (link && link.startsWith('project:')) row.project_id = link.slice(8);
         if (m.cur) row.currency = m.cur;
         if (out.market === 'CASH') { row.symbol = row.currency; row.name = row.name || 'Encaisse'; row.avg_cost = null; }
+        // Older databases may not have this column yet; only send it when it matters.
+        if (row.update_freq == null && !(hd && 'update_freq' in hd)) delete row.update_freq;
+        if (row.asset_class == null && !(hd && 'asset_class' in hd)) delete row.asset_class;
         await saveRow('holdings', row);
       },
       onDelete: hd ? () => deleteRow('holdings', hd.id) : null,
@@ -1412,13 +2104,345 @@
     document.addEventListener('keydown', onKey);
   }
 
+  // --- Portfolio import: Excel, CSV or a Google Sheets link -------------------
+  const HOLDING_COLS = [
+    ['symbol', 'Symbole'], ['name', 'Nom'], ['qty', 'Quantité'], ['avg_cost', 'Coût moyen par part'], ['book_value', 'Coût total'],
+    ['price', 'Cours ou valeur par part'], ['value', 'Valeur totale'], ['account', 'Compte'], ['owner', 'Propriétaire'],
+    ['currency', 'Devise'], ['market', 'Marché'], ['date', 'Date de la valeur'], ['institution', 'Institution'],
+  ];
+  const TEMPLATES = {
+    public: 'Compte;Symbole;Nom;Quantité;Coût moyen;Devise;Propriétaire\nCELI;XEQT;iShares Core Equity;100;28,50;CAD;\nREER;VFV;Vanguard S&P 500;20;110;CAD;\nNon enregistré;AAPL;Apple;5;150;USD;\nCELI;Encaisse;;250;;CAD;\n',
+    private: 'Placement;Compte;Propriétaire;Valeur;Montant investi;Date\nFonds immobilier;Non enregistré;;25000;20000;2026-09-30\nActions de ma compagnie;Société;;120000;50000;2026-06-30\n',
+  };
+
+  function readBuffer(file) {
+    if (typeof file.arrayBuffer === 'function') return file.arrayBuffer();
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => reject(r.error);
+      r.readAsArrayBuffer(file);
+    });
+  }
+
+  function downloadText(name, text) {
+    const url = URL.createObjectURL(new Blob(['﻿' + text], { type: 'text/csv;charset=utf-8' }));
+    const a = h('a', { href: url, download: name });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function openHoldingsImport(kind) {
+    const I = window.Importer;
+    const priv = kind === 'private';
+    const linkKey = priv ? 'private_sheet_url' : 'public_sheet_url';
+    const title = priv ? 'Importer ou mettre à jour les placements privés' : 'Importer des placements publics';
+    const sheet = $('#sheet');
+    const panel = h('div', { class: 'sheet-panel wide', role: 'dialog', 'aria-label': title });
+    const st = {
+      source: '', sheets: [], sheetIdx: 0, header: 0, cols: null, error: '', loading: false,
+      link: S.settings[linkKey] || '', fromLink: false,
+      owner: S.who === 'all' ? (priv ? 'joint' : 'p1') : S.who,
+      account: priv ? 'Non enregistré' : 'CELI', market: 'TSX', date: todayISO(), freq: 'quarterly',
+      candidates: [], plan: null, picks: new Map(), remove: new Set(),
+    };
+    const close = () => { sheet.hidden = true; sheet.replaceChildren(); document.removeEventListener('keydown', onKey); };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    const rows = () => (st.sheets[st.sheetIdx] ? st.sheets[st.sheetIdx].rows : []);
+
+    function useSheet(i) {
+      st.sheetIdx = i;
+      st.header = I.findHeaderRow(rows());
+      st.cols = I.detectHoldingColumns(rows()[st.header] || []);
+      analyze();
+    }
+    function analyze() {
+      if (!rows().length) { st.plan = null; return; }
+      st.candidates = I.toHoldings(rows(), st.header, st.cols, {
+        kind, owner: st.owner, account: st.account, market: st.market, date: st.date,
+        ownerNames: { p1: S.settings.p1_name, p2: S.settings.p2_name },
+      });
+      st.plan = I.planSync(st.candidates, S.holdings.filter((hd) => isPrivate(hd) === priv));
+      st.picks = new Map(st.plan.items.map((it) => [it.key, it.status !== 'same']));
+      st.remove = new Set();
+    }
+
+    async function loadFile(file) {
+      st.error = '';
+      try {
+        const name = file.name.toLowerCase();
+        if (/\.xlsx$|\.xlsm$/.test(name)) st.sheets = await I.readXlsx(await readBuffer(file));
+        else if (/\.(xls|ods|numbers)$/.test(name)) throw new Error('Ce format ne se lit pas directement. Dans Excel ou Numbers : Fichier → Enregistrer sous (ou Exporter) → Classeur Excel (.xlsx) ou CSV, puis importe ce fichier.');
+        else st.sheets = [{ name: file.name, rows: I.parseCSV(await readText(file)) }];
+        if (!st.sheets.length || !st.sheets.some((sh2) => sh2.rows.length > 1)) throw new Error('Ce fichier ne contient aucune ligne de données.');
+        st.source = file.name;
+        st.fromLink = false;
+        useSheet(Math.max(0, st.sheets.findIndex((sh2) => sh2.rows.length > 1)));
+      } catch (e) {
+        st.sheets = []; st.plan = null;
+        st.error = /not-zip|not-xlsx|zip-method/.test(e.message) ? 'Ce fichier .xlsx est illisible. Ouvre-le dans Excel et enregistre-le à nouveau, ou exporte-le en CSV.' : e.message;
+      }
+      draw();
+    }
+
+    async function loadLink() {
+      st.error = '';
+      const url = I.sheetsCsvUrl(st.link);
+      if (!url) { st.error = 'Ce n’est pas un lien Google Sheets (il doit commencer par https://docs.google.com/spreadsheets/…).'; draw(); return; }
+      st.loading = true; draw();
+      const notShared = 'Google Sheets refuse l’accès. Dans la feuille : Partager → Accès général → « Tous les utilisateurs disposant du lien » (Lecteur), puis réessaie.';
+      try {
+        const res = await fetch(url, { credentials: 'omit' });
+        const type = res.headers.get('content-type') || '';
+        if (!res.ok || /html/.test(type)) throw new Error(notShared);
+        const parsed = I.parseCSV(await res.text());
+        if (parsed.length < 2) throw new Error('La feuille est vide.');
+        st.sheets = [{ name: 'Google Sheets', rows: parsed }];
+        st.source = 'Google Sheets';
+        st.fromLink = true;
+        useSheet(0);
+      } catch (e) {
+        st.sheets = []; st.plan = null;
+        st.error = e instanceof TypeError ? notShared : e.message;
+      }
+      st.loading = false;
+      draw();
+    }
+
+    function sourceBlock() {
+      const fileInput = h('input', { type: 'file', id: 'hold-file', accept: '.xlsx,.xlsm,.csv,.txt,.xls,.ods,.numbers,text/csv', onchange: (e) => { if (e.target.files[0]) loadFile(e.target.files[0]); } });
+      const linkInput = h('input', { id: 'hold-link', type: 'url', value: st.link, placeholder: 'https://docs.google.com/spreadsheets/d/…', autocomplete: 'off', spellcheck: 'false',
+        oninput: (e) => { st.link = e.target.value.trim(); }, onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); loadLink(); } } });
+      return h('div', { class: 'fields' },
+        h('div', { class: 'field' }, h('label', { for: 'hold-file', text: 'Fichier Excel (.xlsx) ou CSV' }), fileInput,
+          h('span', { class: 'hint' }, st.source && !st.fromLink ? h('strong', { text: `Chargé : ${st.source}. ` }) : null, 'Lu dans ton navigateur, jamais envoyé. ',
+            h('a', { href: '#', onclick: (e) => { e.preventDefault(); downloadText(priv ? 'modele-placements-prives.csv' : 'modele-placements-publics.csv', TEMPLATES[kind]); }, text: 'Télécharger un modèle' }))),
+        h('div', { class: 'field' }, h('label', { for: 'hold-link', text: 'Ou un lien Google Sheets' }),
+          h('div', { class: 'inline-row' }, linkInput, h('button', { class: 'btn', type: 'button', disabled: st.loading ? true : null, onclick: loadLink, text: st.loading ? 'Chargement…' : 'Charger' })),
+          h('span', { class: 'hint', text: 'Partage la feuille en « Tous les utilisateurs disposant du lien » (Lecteur). Quiconque a ce lien peut la voir : garde-le pour toi. Plus privé : Fichier → Télécharger → .xlsx, puis importe le fichier.' })));
+    }
+
+    function defaultsBlock() {
+      const sel = (id, label, value, opts, onChange, hint) => h('div', { class: 'field' }, h('label', { for: id, text: label }),
+        h('select', { id, onchange: (e) => { onChange(e.target.value); analyze(); draw(); } },
+          (Array.isArray(opts) ? opts.map((o) => [o, o]) : Object.entries(opts)).map(([v, l]) => h('option', { value: v, selected: v === value ? true : null, text: l }))),
+        hint ? h('span', { class: 'hint', text: hint }) : null);
+      const list = [
+        sel('hold-owner', 'Propriétaire', st.owner, ownerOptions(), (v) => { st.owner = v; }, st.cols && st.cols.owner >= 0 ? 'Quand la colonne Propriétaire est vide' : 'Le fichier n’a pas de colonne Propriétaire'),
+        sel('hold-account', 'Compte', st.account, ACCOUNTS, (v) => { st.account = v; }, st.cols && st.cols.account >= 0 ? 'Quand la colonne Compte est vide' : 'Le fichier n’a pas de colonne Compte'),
+      ];
+      if (!priv) {
+        list.push(sel('hold-market', 'Bourse par défaut', st.market, { TSX: 'TSX', US: 'NYSE / Nasdaq', NEO: 'Cboe Canada', TSXV: 'TSX croissance' }, (v) => { st.market = v; },
+          'Pour les symboles sans suffixe (.TO) ni devise USD'));
+      } else {
+        list.push(h('div', { class: 'field' }, h('label', { for: 'hold-date', text: 'Valeur en date du' }),
+          h('input', { id: 'hold-date', type: 'date', value: st.date, onchange: (e) => { st.date = e.target.value || todayISO(); analyze(); draw(); } }),
+          h('span', { class: 'hint', text: 'Quand le fichier n’a pas de date' })));
+        list.push(sel('hold-freq', 'Mise à jour prévue', st.freq, { '': 'Aucun rappel', monthly: 'Chaque mois', quarterly: 'Chaque trimestre' }, (v) => { st.freq = v; }, 'Pour les nouveaux placements'));
+      }
+      return h('div', { class: 'fields' }, list);
+    }
+
+    function columnsBlock(missingRequired) {
+      const r = rows();
+      const headerCells = r[st.header] || [];
+      const headerSel = h('select', { id: 'hold-header', onchange: (e) => { st.header = Number(e.target.value); st.cols = I.detectHoldingColumns(r[st.header] || []); analyze(); draw(); } },
+        r.slice(0, 20).map((row, i) => h('option', { value: String(i), selected: i === st.header ? true : null,
+          text: `Ligne ${i + 1} : ${row.filter(Boolean).slice(0, 4).join(' · ').slice(0, 60) || '(vide)'}` })));
+      const keys = HOLDING_COLS.filter(([k]) => !(priv && k === 'market'));
+      const pick = ([k, label]) => h('div', { class: 'field' }, h('label', { for: 'hold-col-' + k, text: label }),
+        h('select', { id: 'hold-col-' + k, onchange: (e) => { st.cols[k] = Number(e.target.value); analyze(); draw(); } },
+          h('option', { value: '-1', text: '—' }),
+          headerCells.map((c, i) => h('option', { value: String(i), selected: st.cols[k] === i ? true : null, text: c || `Colonne ${i + 1}` }))));
+      const found = keys.filter(([k]) => st.cols[k] >= 0).map(([, l]) => l);
+      return h('details', { class: 'cols', open: missingRequired ? true : null },
+        h('summary', null, found.length ? `Colonnes reconnues : ${found.join(', ')}` : 'Aucune colonne reconnue', h('span', { class: 'muted-caption', text: ' (modifier)' })),
+        h('div', { class: 'fields' }, h('div', { class: 'field wide' }, h('label', { for: 'hold-header', text: 'Ligne des titres de colonnes' }), headerSel), keys.map(pick)));
+    }
+
+    function previewBlock() {
+      const out = [];
+      const items = st.plan.items;
+      const fmtVal = (row) => (row.market === 'MANUAL' ? native(row.qty * row.manual_price, row.currency)
+        : row.market === 'CASH' ? native(row.qty, row.currency) : `${fmtQty.format(row.qty)} parts`);
+      const oldVal = (hd) => (hd.market === 'MANUAL' ? native(num(hd.qty) * num(hd.manual_price), hd.currency)
+        : hd.market === 'CASH' ? native(num(hd.qty), hd.currency) : `${fmtQty.format(num(hd.qty))} parts`);
+      const counts = { new: 0, update: 0, same: 0 };
+      for (const it of items) counts[it.status]++;
+      out.push(h('p', null, h('strong', { text: `${items.length} placement(s) lu(s)` }),
+        ` dans « ${st.source}${st.sheets.length > 1 ? ' › ' + st.sheets[st.sheetIdx].name : ''} » : ${counts.new} nouveau(x), ${counts.update} à mettre à jour, ${counts.same} identique(s).`));
+      const body = items.map((it) => {
+        const row = it.row;
+        const pill = it.status === 'new' ? h('span', { class: 'pill info', text: 'nouveau' })
+          : it.status === 'update' ? h('span', { class: 'pill ok', text: 'mise à jour' }) : h('span', { class: 'pill', text: 'identique' });
+        const label = row.market === 'MANUAL' ? (row.name || row.symbol) : row.market === 'CASH' ? `Encaisse ${row.currency}` : row.symbol;
+        return h('tr', null,
+          h('td', null, h('input', { type: 'checkbox', 'aria-label': 'Importer ' + label, checked: st.picks.get(it.key) ? true : null,
+            onchange: (e) => { st.picks.set(it.key, e.target.checked); updateCount(); } })),
+          h('td', null, h('strong', { text: label }), ' ', row.currency === 'USD' ? h('span', { class: 'pill info', text: 'USD' }) : null, ' ', pill,
+            h('span', { class: 'sub', text: [row.market === 'MANUAL' || row.market === 'CASH' ? null : row.name, row.account, ownerName(row.owner)].filter(Boolean).join(' · ') })),
+          h('td', { class: 'r' }, fmtVal(row), it.status === 'update' ? h('span', { class: 'sub', text: 'avant : ' + oldVal(it.match) }) : null),
+          h('td', { class: 'r hide-sm' }, row.market === 'CASH' || row.avg_cost === null ? '—' : native(row.avg_cost, row.currency),
+            h('span', { class: 'sub', text: row.market === 'MANUAL' && row.manual_price_date ? fmtDate(row.manual_price_date) : '' })));
+      });
+      out.push(h('div', { class: 'table-wrap import-table' }, h('table', null,
+        h('thead', null, h('tr', null, h('th', { text: '' }), h('th', { text: priv ? 'Placement' : 'Titre' }), h('th', { class: 'r', text: priv ? 'Valeur' : 'Quantité' }),
+          h('th', { class: 'r hide-sm', text: priv ? 'Investi par part' : 'Coût moyen' }))),
+        h('tbody', null, body))));
+      const skipped = st.candidates.filter((c) => !c.ok);
+      if (skipped.length) {
+        out.push(h('details', { class: 'cols' }, h('summary', null, `${skipped.length} ligne(s) ignorée(s)`),
+          h('ul', { class: 'muted-caption' }, skipped.slice(0, 50).map((c) => h('li', { text: `Ligne ${c.line} (${c.label}) : ${c.reason}` })))));
+      }
+      if (st.plan.missing.length) {
+        out.push(h('h3', { class: 'subhead', text: 'Absents du fichier' }),
+          h('p', { class: 'footnote', text: 'Ces placements sont enregistrés dans les mêmes comptes, mais ne sont pas dans le fichier (vendus?). Coche ceux à retirer de l’app.' }),
+          h('div', { class: 'checks' }, st.plan.missing.map((hd) => h('label', { class: 'switch' },
+            h('input', { type: 'checkbox', checked: st.remove.has(hd.id) ? true : null, onchange: (e) => { if (e.target.checked) st.remove.add(hd.id); else st.remove.delete(hd.id); updateCount(); } }),
+            `Retirer ${hd.market === 'MANUAL' ? hd.name || hd.symbol : hd.market === 'CASH' ? 'l’encaisse ' + hd.currency : hd.symbol} · ${hd.account} · ${ownerName(hd.owner)}`))));
+      }
+      return out;
+    }
+
+    const err = h('p', { class: 'form-error', role: 'alert' });
+    const applyBtn = h('button', { class: 'btn primary', type: 'button', onclick: apply });
+    function updateCount() {
+      const n = st.plan ? st.plan.items.filter((it) => st.picks.get(it.key)).length : 0;
+      const m = st.remove.size;
+      applyBtn.textContent = n || m ? `Enregistrer${n ? ` ${n} placement${n > 1 ? 's' : ''}` : ''}${m ? `${n ? ' et' : ''} retirer ${m}` : ''}` : 'Enregistrer';
+      applyBtn.disabled = !(n || m);
+    }
+
+    async function apply() {
+      err.textContent = '';
+      const inserts = [], updates = [];
+      for (const it of st.plan.items) {
+        if (!st.picks.get(it.key)) continue;
+        const row = it.row;
+        if (!it.match) {
+          inserts.push(priv && st.freq ? { ...row, update_freq: st.freq } : row);
+          continue;
+        }
+        const upd = { qty: row.qty };
+        if (row.avg_cost !== null) upd.avg_cost = row.avg_cost;
+        if (row.market === 'MANUAL') {
+          upd.manual_price = row.manual_price;
+          upd.manual_price_date = row.manual_price_date;
+          if (st.freq && !it.match.update_freq) upd.update_freq = st.freq;
+        }
+        if (row.name && !it.match.name) upd.name = row.name;
+        if (row.institution && !it.match.institution) upd.institution = row.institution;
+        updates.push([it.match.id, upd]);
+      }
+      applyBtn.disabled = true;
+      try {
+        if (inserts.length) { const r = await sb.from('holdings').insert(inserts); if (r.error) throw r.error; }
+        const results = await Promise.all(updates.map(([id, upd]) => sb.from('holdings').update(upd).eq('id', id)));
+        const bad = results.find((r) => r.error);
+        if (bad) throw bad.error;
+        if (st.remove.size) { const r = await sb.from('holdings').delete().in('id', [...st.remove]); if (r.error) throw r.error; }
+        if (st.fromLink && st.link !== (S.settings[linkKey] || '')) {
+          const r = await sb.from('settings').update({ [linkKey]: st.link }).eq('id', 1);
+          if (r.error) console.warn('Lien non mémorisé :', r.error.message);
+        }
+      } catch (e) {
+        err.textContent = errText(e);
+        applyBtn.disabled = false;
+        return;
+      }
+      close();
+      toast([inserts.length ? `${inserts.length} ajouté(s)` : '', updates.length ? `${updates.length} mis à jour` : '', st.remove.size ? `${st.remove.size} retiré(s)` : ''].filter(Boolean).join(', '));
+      refresh();
+    }
+
+    function draw() {
+      const parts = [h('h2', { text: title }),
+        h('p', { class: 'footnote', text: priv
+          ? 'Une ligne par placement : nom, valeur actuelle, et si possible le montant investi, le compte, le propriétaire et la date de la valeur. Les placements déjà enregistrés (même nom, même compte) sont mis à jour.'
+          : 'Exporte tes positions depuis ton courtier (Excel ou CSV) ou utilise ta propre feuille : symbole, quantité, et si possible le coût moyen, le compte et la devise. Les titres déjà enregistrés (même symbole, même compte) sont mis à jour.' }),
+        sourceBlock()];
+      if (st.error) parts.push(h('div', { class: 'banner', text: st.error }));
+      if (st.sheets.length > 1) {
+        parts.push(h('div', { class: 'field' }, h('label', { for: 'hold-sheet', text: 'Onglet' }),
+          h('select', { id: 'hold-sheet', onchange: (e) => { useSheet(Number(e.target.value)); draw(); } },
+            st.sheets.map((sh2, i) => h('option', { value: String(i), selected: i === st.sheetIdx ? true : null, text: `${sh2.name} (${Math.max(0, sh2.rows.length - 1)} lignes)` })))));
+      }
+      if (st.plan) {
+        const c = st.cols;
+        const missingRequired = priv ? !((c.name >= 0 || c.symbol >= 0) && (c.value >= 0 || c.price >= 0)) : !(c.symbol >= 0 && (c.qty >= 0 || c.value >= 0));
+        parts.push(h('h3', { class: 'subhead', text: 'Valeurs par défaut' }), defaultsBlock(), columnsBlock(missingRequired));
+        if (missingRequired) parts.push(h('div', { class: 'banner', text: priv ? 'Indique au moins la colonne du nom et celle de la valeur.' : 'Indique au moins la colonne du symbole et celle de la quantité.' }));
+        if (st.plan.items.length || st.plan.missing.length) parts.push(...previewBlock());
+        else if (!missingRequired) parts.push(h('div', { class: 'banner', text: 'Aucun placement reconnu dans cette feuille. Vérifie la ligne des titres de colonnes ci-dessus.' }));
+      }
+      updateCount();
+      panel.replaceChildren(...parts, err,
+        h('div', { class: 'sheet-actions' }, h('div', { class: 'right' }, h('button', { class: 'btn ghost', type: 'button', onclick: close, text: 'Fermer' }), applyBtn)));
+    }
+
+    draw();
+    sheet.replaceChildren(panel);
+    sheet.hidden = false;
+    sheet.onclick = (e) => { if (e.target === sheet) close(); };
+    document.addEventListener('keydown', onKey);
+    if (st.link) loadLink();
+  }
+
+  /** Every table in one Excel file (a backup the household keeps; Supabase's free plan has no automatic backups). */
+  function exportAll() {
+    const own = (o) => ownerName(o);
+    const n = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
+    const holdings = S.holdings.map((hd) => {
+      const v = C.valueHolding(hd, S.prices);
+      return [hd.symbol, hd.name, hd.market, hd.account, own(hd.owner), hd.currency, n(hd.qty), n(hd.avg_cost), v.px, v.mv === null ? null : Math.round(v.mv * 100) / 100, v.date, CLASSES[Object.keys(holdingMix(hd))[0]] || ''];
+    });
+    const sheets = [
+      { name: 'Placements', rows: [['Symbole', 'Nom', 'Marché', 'Compte', 'Propriétaire', 'Devise', 'Quantité', 'Coût moyen', 'Cours', 'Valeur (CAD)', 'Date du cours', 'Catégorie'], ...holdings] },
+      { name: 'Transactions', rows: [['Date', 'Opération', 'Titre', 'Compte', 'Propriétaire', 'Quantité', 'Prix', 'Frais', 'Devise', 'Taux USD/CAD', 'Gain réalisé (CAD)', 'Note'],
+        ...S.transactions.map((t) => [t.trade_date, t.kind === 'buy' ? 'Achat' : 'Vente', t.symbol, t.account, own(t.owner), n(t.qty), n(t.price), n(t.fees), t.currency, n(t.fx_rate), n(t.realized_gain), t.note])] },
+      { name: 'Actifs', rows: [['Nom', 'Type', 'Valeur', 'En date du', 'Propriétaire'], ...S.assets.map((a) => [a.name, a.kind, n(a.value), a.as_of, own(a.owner)])] },
+      { name: 'Dettes', rows: [['Nom', 'Type', 'Prêteur', 'Solde', 'Solde au', 'Taux %', 'Taux', 'Paiement', 'Fréquence', 'Fin du terme', 'Propriétaire'],
+        ...S.debts.map((d) => [d.name, DEBT_KINDS[d.kind], d.lender, n(d.balance), d.balance_date, n(d.rate), d.rate_type === 'variable' ? 'variable' : 'fixe', n(d.payment), (FREQS[d.freq] || {}).label, C.termEnd(d), own(d.owner)])] },
+      { name: 'Budget', rows: [['Description', 'Catégorie', 'Type', 'Montant', 'Fréquence', 'Par mois', 'Pour'],
+        ...S.budget.map((b) => [b.name, b.grp, b.kind === 'income' ? 'Revenu' : b.nature === 'variable' ? 'Enveloppe' : 'Dépense fixe', n(b.amount), (FREQS[b.freq] || {}).label, Math.round(C.monthly(b.amount, b.freq) * 100) / 100, own(b.owner)])] },
+      { name: 'Dépenses ponctuelles', rows: [['Date', 'Description', 'Catégorie', 'Montant', 'Pour'], ...S.log.map((e) => [e.spend_date, e.label, e.grp, n(e.amount), own(e.owner)])] },
+      { name: 'Enfants', rows: [['Nom', 'Naissance', 'Valeur REEE entrée', 'En date du'], ...S.children.map((c) => [c.name, c.birth_date, n(c.resp_value), c.resp_value_date])] },
+      { name: 'REEE', rows: [['Enfant', 'Date', 'Type', 'Cotisation', 'SCEE', 'IQEE', 'Note'],
+        ...S.resp.map((r) => [(S.children.find((c) => c.id === r.child_id) || {}).name, r.entry_date, r.kind === 'opening' ? 'Solde de départ' : 'Cotisation', n(r.amount), n(r.cesg), n(r.iqee), r.note])] },
+      { name: 'Projets', rows: [['Nom', 'Cible', 'Date cible', 'Déjà de côté', 'Par mois', 'Rendement %'], ...S.projects.map((p) => [p.name, n(p.target_amount), p.target_date, n(p.saved), n(p.monthly_contribution), n(p.expected_return)])] },
+      { name: 'Compagnies', rows: [['Nom', 'Forme', 'Propriétaire', 'Salaire', 'Dividendes', '5 500 h', 'Revenus / an', 'Dépenses / an', 'Impôt de la compagnie', 'Dans vos poches'],
+        ...S.companies.map((c) => { const v = companyView(c); return [c.name, CO_KIND[c.kind], own(c.owner), n(c.salary), n(c.dividends), c.sbd_hours ? 'oui' : 'non', Math.round(v.y.revenue), Math.round(v.y.expenses), v.y.corpTax ? Math.round(v.y.corpTax.total) : null, Math.round(v.pocket)]; })] },
+      { name: 'Lignes des compagnies', rows: [['Compagnie', 'Description', 'Catégorie', 'Type', 'Montant', 'Fréquence', 'Déductible %'],
+        ...S.company_items.map((i) => [(S.companies.find((c) => c.id === i.company_id) || {}).name, i.name, i.grp, i.kind === 'income' ? 'Revenu' : 'Dépense', n(i.amount), (FREQS[i.freq] || {}).label, n(i.deductible_pct)])] },
+      { name: 'Droits CELI-REER', rows: [['Personne', 'Régime', 'Année', 'Type', 'Montant', 'Date', 'Note'],
+        ...S.contributions.map((c) => [own(c.owner), c.plan, n(c.year), { room: 'Droits', contribution: 'Cotisation', withdrawal: 'Retrait' }[c.kind], n(c.amount), c.entry_date, c.note])] },
+      { name: 'Historique avoir net', rows: [['Date', 'Placements', 'Autres actifs', 'Dettes', 'Avoir net'],
+        ...S.snapshots.filter((x) => x.data && x.data.all).map((x) => [x.snap_date, n(x.data.all.inv), n(x.data.all.oth), n(x.data.all.debt), n(x.data.all.net)])] },
+    ];
+    const bytes = window.Importer.writeXlsx(sheets);
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+    const a = h('a', { href: url, download: `finances-menage-${todayISO()}.xlsx` });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    toast('Fichier Excel créé');
+  }
+
   function openSettings() {
     openForm({
       title: 'Réglages',
-      values: { p1_name: S.settings.p1_name, p2_name: S.settings.p2_name },
+      values: { p1_name: S.settings.p1_name, p2_name: S.settings.p2_name, public_sheet_url: S.settings.public_sheet_url, private_sheet_url: S.settings.private_sheet_url },
       fields: [
         { k: 'p1_name', label: 'Nom de la personne 1', type: 'text', req: true },
         { k: 'p2_name', label: 'Nom de la personne 2', type: 'text', req: true },
+        // Only once the database has these columns (schema.sql run again after the update).
+        ...('public_sheet_url' in S.settings ? [
+          { k: 'public_sheet_url', label: 'Lien Google Sheets : placements publics', type: 'text', wide: true, placeholder: 'Aucun', hint: 'Mémorisé au premier import par lien. Efface-le pour l’oublier.' },
+          { k: 'private_sheet_url', label: 'Lien Google Sheets : placements privés', type: 'text', wide: true, placeholder: 'Aucun' },
+        ] : []),
       ],
       onSave: async (out) => {
         const res = await sb.from('settings').update(out).eq('id', 1);

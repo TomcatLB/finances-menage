@@ -63,12 +63,20 @@ From then on it runs Monday–Friday at 22:30 UTC (18:30 in Montréal in summer,
 
 | Tab | What goes in |
 |---|---|
-| **Portfolio** | Each ETF, stock or fund, per account (CELI, REER, CELIAPP, REEE…). Symbols go in **without** a suffix (`XEQT`, `VFV`, `AAPL`; class shares like `BAM.A`); pick the market. Mutual funds or crypto: choose *Prix entré à la main* and update the price yourself. Cash in a brokerage account: *Encaisse*. A holding can be **associated** with a child (its REEE) or a project, so it counts there automatically. |
+| **Portfolio** | Two sections. **Placements publics**: each ETF or stock per account (CELI, REER, CELIAPP, REEE…), priced every weekday at the close; symbols go in **without** a suffix (`XEQT`, `VFV`, `AAPL`; class shares like `BAM.A`); cash in a brokerage account is *Encaisse*. **Placements privés**: private funds, shares of your own company, private loans, mutual funds or crypto, valued by hand, with an optional monthly or quarterly reminder. Both sections can be **imported** from an Excel file (.xlsx), a CSV or a Google Sheets link (see below). A holding can be **associated** with a child (its REEE) or a project, so it counts there automatically. Also in this tab: **asset allocation** against a target mix (with what to buy or sell), **buys and sells** with realized gains (taxable vs sheltered), and **CELI / REER room** for each person. |
 | **Actifs** | The house, bank accounts, vehicles… with an estimated value. The net-worth chart fills in automatically, one point per trading day. |
 | **Budget** | **Fixed expenses** (rent, Hydro, Internet, insurance…), **income**, and **variable envelopes** (travel, shopping, outings) with a monthly amount. Ad hoc spending is noted as it happens and compared to its envelope month by month. **Importer des relevés** reads RBC CSV exports (2–3 months), detects what comes back every month and proposes budget lines. Debt payments come from the Debts tab (toggle at the top). |
 | **Enfants** | One card per child: recurring expenses (daycare, activities), one-off expenses (toys, clothes), and the **REEE**: contributions, SCEE and IQEE received, and how much to contribute this year to get the maximum basic grants. |
 | **Dettes** | Mortgage (rate, term, amortization, prepayment privilege) plus lines of credit, car loans, cards. Shows interest per month, the balance at renewal, remaining amortization and a projected balance chart. Leave the mortgage payment empty to have it computed from the amortization. |
 | **Projets** | A goal (cottage, renovation…) with a target amount and date: progress, whether you're on track, and the monthly amount needed. |
+| **Compagnies** | Each company (incorporated or self-employed): revenue and expense lines (meals 50 % deductible), the salary and dividends you pay yourselves. Estimates the company's tax (Québec rate with or without the 5,500 paid hours), payroll charges, your personal tax, and what lands in your pockets; compares paying it all as salary or as dividends; one click puts the net amount in the Budget. |
+| **Projections** | Net worth year by year to the end year you choose: returns with a standard deviation (500 market simulations, pessimistic to optimistic range), inflation, real estate growth, each person's raise, children's costs, mortgage payoff, retirement age, RRQ and PSV. Work income comes from the Budget. |
+
+### Importing a portfolio (Excel, CSV or Google Sheets)
+
+In **Portfolio**, click **Importer** (public) or **Importer / mettre à jour** (private). Choose a file exported from your broker or your own sheet, or paste a Google Sheets link. Columns are recognized by name (symbole, quantité, coût moyen, compte, devise, valeur, date…, in French or English); if a column isn't recognized, pick it from the list. The preview shows what is **new**, what will be **updated** (same title, same account) and what is **unchanged**; titles saved in the same accounts but absent from the file can be removed. Download the template from the import window to see the expected layout.
+
+A Google Sheets link must be shared as *Anyone with the link* (Viewer), which means anyone holding the link can read the sheet. For more privacy, use *File → Download → Microsoft Excel (.xlsx)* and import the file instead: files are read in the browser and never uploaded. The link is remembered so the next update is one click; clear it in **Réglages**.
 
 ### Importing RBC statements
 
@@ -88,7 +96,9 @@ In RBC Online Banking, open the account or credit card, choose the period, then 
 - **REEE grants.** The app uses the basic 2025 rules: SCEE 20 % (up to $500 a year, $1,000 with carry-forward, $7,200 lifetime) and IQEE 10 % (up to $250 a year, $500 with carry-forward, $3,600 lifetime), until the year the child turns 17. The income-tested extras (additional SCEE, IQEE supplement, Canada Learning Bond) aren't computed. Check the amounts each year on canada.ca and revenuquebec.ca.
 - **Estimates, not statements.** Debt figures assume a constant rate. Fixed-rate Canadian mortgages are computed with semi-annual compounding, as the Interest Act requires lenders to quote them; variable mortgages and other loans use monthly compounding. The lender's statement is always the authority. USD holdings' cost is converted at today's rate, which is not the adjusted cost base used for taxes.
 - **Forgotten password.** Reset it in Supabase: **Authentication → Users → … → Send password recovery**, or set a new one there.
-- **Backups.** Supabase's free plan doesn't include downloadable backups. For a copy, go to **Table Editor**, open each table and use **Export → CSV** now and then.
+- **Backups.** Supabase's free plan doesn't include downloadable backups. Click **Exporter** at the top of the app now and then: it downloads everything as one Excel file.
+- **Reminders by email.** After the price update, the daily job opens a GitHub issue named *Rappels* when a private investment needs a new value, a mortgage term ends within 120 days, or the RRSP deadline is near; GitHub emails the repository owner. Make sure you *Watch* the repository (it's the default for your own repos) and that GitHub has your email.
+- **Tax figures** are 2026 estimates for Québec (sources in `docs/taux-2026.md`). They leave out refundable and family credits, capital cost allowance, the AMT and corporate investment income. Check with your accountant before deciding.
 
 ---
 
@@ -96,14 +106,19 @@ In RBC Online Banking, open the account or credit card, choose the period, then 
 
 ```
 index.html, styles.css, app.js   the web app
+dev.html, dev/                   test mode with made-up data (never touches the real database)
 calc.js                          the formulas (valuation, net worth, debt, REEE, projects)
-importer.js                      bank CSV reading and recurring-expense detection
+tax.js                           Québec + federal tax estimates (personal, payroll, corporate)
+projection.js                    net-worth projection and retirement
+importer.js                      bank CSV, portfolio import (Excel, Google Sheets), Excel export
 config.js                        your Supabase URL + publishable key
 supabase/schema.sql              tables and access rules
 scripts/update_prices.py         the daily price job (run by GitHub Actions)
+scripts/reminders.py             the daily reminders (GitHub issue, emailed by GitHub)
+docs/taux-2026.md                the tax and benefit figures, with sources
 .github/workflows/prices.yml     its schedule
 tests/                           checks that the page and the job compute the same numbers
 ```
 
 To try the page on your computer: `python3 -m http.server` in the repo folder, then open http://localhost:8000.
-To run the tests: `node tests/parity_test.mjs` and `python3 -m unittest discover tests` (needs `requests` installed).
+To run the tests: `node tests/parity_test.mjs`, `node tests/import_test.mjs` and `python3 -m unittest discover tests` (needs `requests` installed).

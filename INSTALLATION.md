@@ -96,10 +96,14 @@ Ensuite, ça roule tout seul du lundi au vendredi vers 18 h 30 (17 h 30 en hiver
 ## 8. Premiers pas dans l'app
 
 - **Réglages** (en haut) : mettez vos deux prénoms.
-- **Portfolio** : vos FNB et actions, par compte (CELI, REER, CELIAPP, REEE…). Symboles sans suffixe (`XEQT`, `VFV`). Après vos premiers placements, relancez l'étape 7.4 pour avoir les prix tout de suite.
+- **Portfolio** : deux sections. **Placements publics** (FNB, actions, encaisse) : le cours se met à jour chaque soir de bourse; symboles sans suffixe (`XEQT`, `VFV`). **Placements privés** (fonds privés, actions de votre compagnie, prêts privés…) : vous entrez la valeur, avec un rappel chaque mois ou trimestre. Le bouton **Importer** lit un fichier Excel ou CSV de votre courtier, ou un lien Google Sheets, et vous montre ce qui sera ajouté ou mis à jour avant d'enregistrer. Après vos premiers placements, relancez l'étape 7.4 pour avoir les prix tout de suite.
 - **Actifs** : maison, comptes bancaires, autos… avec une valeur estimée.
 - **Budget** : dépenses fixes, revenus, enveloppes. **Importer des relevés** lit les fichiers CSV de RBC (et la plupart des autres banques). Le fichier est lu dans votre navigateur et n'est jamais envoyé ailleurs.
+- Aussi dans **Portfolio** : la **répartition des actifs** (actions, obligations…) avec une cible, les **achats et ventes** (gains en capital imposables ou à l'abri), et les **droits CELI et REER** de chacun.
 - **Enfants**, **Dettes**, **Projets** : comme leur nom l'indique.
+- **Compagnies** : les revenus et dépenses de vos compagnies (incorporée ou travailleur autonome), le salaire et les dividendes que vous vous versez. L'app estime l'impôt de la compagnie, votre impôt personnel et ce qui reste dans vos poches, et compare « tout en salaire » et « tout en dividendes ». Le bouton **Ajouter au Budget** inscrit ce montant net comme revenu. Ce sont des estimations : validez avec votre comptable.
+- **Projections** : votre avoir net année par année, avec vos hypothèses (rendement, inflation, immobilier, hausses de salaire, coûts des enfants, âge de retraite, RRQ et PSV). Entrez vos années de naissance pour voir la retraite.
+- **Exporter** (en haut) : télécharge toutes vos données dans un fichier Excel. Faites-le de temps en temps : c'est votre copie de sécurité.
 - **Ménage / Personne 1 / Personne 2** en haut change la vue. Ce qui est *Commun* compte 50/50.
 
 ---
@@ -120,6 +124,22 @@ Dans GitHub : **Add file → Create new file**. Comme nom, tapez exactement :
 
 Ouvrez `.github/workflows/prices.yml` du dossier décompressé avec TextEdit, copiez tout, collez-le dans GitHub, puis **Commit changes**.
 
+## Rappels par courriel
+
+Chaque soir de semaine, après les prix, GitHub vérifie trois choses : un placement privé à mettre à jour, un terme d'hypothèque qui finit dans moins de 120 jours, et la date limite REER en février. S'il y a quelque chose, un « issue » nommé **Rappels** apparaît dans l'onglet **Issues** de votre dépôt, et GitHub vous l'envoie par courriel. Vérifiez dans GitHub (**Settings → Notifications**) que les courriels sont activés.
+
+## Modifier l'app avec Claude, sur votre ordi
+
+L'app est faite pour être modifiée avec Claude : le fichier `CLAUDE.md` lui explique comment elle fonctionne, et une page de test (`dev.html`) lui permet d'essayer les changements avec des données fictives, sans toucher à vos vrais chiffres.
+
+1. Installez **GitHub Desktop** (desktop.github.com) et connectez-vous avec votre compte GitHub.
+2. **File → Clone repository**, choisissez `finances-menage`. Comme dossier, prenez votre dossier personnel (par exemple `/Users/votre-nom/finances-menage`), **pas** le Bureau ni Documents : macOS y bloque certains outils.
+3. Dans l'app **Claude** (onglet Code), ouvrez ce dossier et demandez ce que vous voulez, en français. Claude essaie le changement dans la page de test, lance les vérifications, puis vous montre le résultat.
+4. Quand c'est bon, demandez à Claude de faire le commit, puis cliquez **Push origin** dans GitHub Desktop. Votre site se met à jour en une ou deux minutes.
+5. Si Claude ajoute une table ou une colonne à la base de données, il vous le dira : relancez alors `supabase/schema.sql` dans Supabase (étape 2), avec vos deux courriels.
+
 ## Recevoir une nouvelle version
 
-Si on vous envoie une nouvelle version de l'app : téléversez les nouveaux fichiers dans votre dépôt GitHub (**Add file → Upload files**), **sauf `config.js`** (gardez le vôtre). Puis relancez `supabase/schema.sql` dans le SQL Editor, avec vos deux courriels dedans. C'est sans danger : ça ajoute seulement ce qui manque.
+Si on vous envoie une nouvelle version de l'app : téléversez les nouveaux fichiers dans votre dépôt GitHub (**Add file → Upload files**), **sauf `config.js`** (gardez le vôtre). Le dossier caché `.github` ne passe souvent pas par le glisser-déposer : ouvrez alors `.github/workflows/prices.yml` sur GitHub, cliquez le crayon et collez la nouvelle version. Puis relancez `supabase/schema.sql` dans le SQL Editor, avec vos deux courriels dedans. C'est sans danger : ça ajoute seulement ce qui manque, vos données restent. Si l'app affiche « Nouveautés à activer », c'est cette étape qui manque.
+
+Avec GitHub Desktop (section précédente), c'est plus simple : copiez les nouveaux fichiers dans votre dossier (sauf `config.js`), puis **Commit** et **Push origin**.

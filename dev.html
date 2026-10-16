@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="fr-CA">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex, nofollow">
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <title>Finances du ménage (mode test)</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap">
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    .dev-banner { position: sticky; top: 0; z-index: 50; display: flex; gap: 12px; align-items: center; justify-content: center; flex-wrap: wrap;
+      padding: 6px 12px; background: #b45309; color: #fff; font: 700 13px/1.4 Nunito, system-ui, sans-serif; }
+    .dev-banner button { font: inherit; padding: 2px 10px; border-radius: 999px; border: 1px solid #fff; background: transparent; color: #fff; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <!-- Test mode: made-up data kept in this browser tab. config.js (the real database) is NOT loaded here. -->
+  <div class="dev-banner" role="note">Mode test : données fictives, rien n’est enregistré dans la vraie base
+    <button type="button" onclick="DevDB.reset()">Réinitialiser</button></div>
+  <div id="app" class="app" aria-live="polite">
+    <div class="boot">Chargement…</div>
+  </div>
+  <div id="sheet" class="sheet" hidden></div>
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script src="dev/fake-supabase.js"></script>
+  <script src="calc.js"></script>
+  <script src="tax.js"></script>
+  <script src="projection.js"></script>
+  <script src="importer.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
