@@ -721,6 +721,102 @@
     return { str: out, end: s.length };
   }
 
+  // Statements are often "protected" with an empty open password (they open without asking,
+  // but printing or copying is restricted): the content is encrypted with a key anyone can derive.
+  // Standard security handler, revisions 2 to 6 (RC4, AES-128, AES-256), empty password only.
+  function md5(bytes) {
+    const K = new Uint32Array(64), S = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
+    for (let i = 0; i < 64; i++) K[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 2 ** 32);
+    const n = bytes.length, total = ((n + 8) >> 6) + 1, w = new Uint32Array(total * 16);
+    for (let i = 0; i < n; i++) w[i >> 2] |= bytes[i] << ((i % 4) * 8);
+    w[n >> 2] |= 0x80 << ((n % 4) * 8);
+    w[total * 16 - 2] = (n * 8) >>> 0; w[total * 16 - 1] = Math.floor(n / 0x20000000);
+    let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+    for (let blk = 0; blk < total * 16; blk += 16) {
+      let a = a0, b = b0, c = c0, d = d0;
+      for (let i = 0; i < 64; i++) {
+        let f, g;
+        if (i < 16) { f = (b & c) | (~b & d); g = i; } else if (i < 32) { f = (d & b) | (~d & c); g = (5 * i + 1) % 16; } else if (i < 48) { f = b ^ c ^ d; g = (3 * i + 5) % 16; } else { f = c ^ (b | ~d); g = (7 * i) % 16; }
+        const tmp = d; d = c; c = b;
+        const x = (a + f + K[i] + w[blk + g]) >>> 0, sh = S[(i >> 4) * 4 + (i % 4)];
+        b = (b + ((x << sh) | (x >>> (32 - sh)))) >>> 0; a = tmp;
+      }
+      a0 = (a0 + a) >>> 0; b0 = (b0 + b) >>> 0; c0 = (c0 + c) >>> 0; d0 = (d0 + d) >>> 0;
+    }
+    const out = new Uint8Array(16);
+    [a0, b0, c0, d0].forEach((v, i) => { for (let k = 0; k < 4; k++) out[i * 4 + k] = (v >>> (8 * k)) & 255; });
+    return out;
+  }
+  function rc4(key, data) {
+    const s = new Uint8Array(256), out = new Uint8Array(data.length);
+    for (let i = 0; i < 256; i++) s[i] = i;
+    for (let i = 0, j = 0; i < 256; i++) { j = (j + s[i] + key[i % key.length]) & 255; [s[i], s[j]] = [s[j], s[i]]; }
+    for (let k = 0, i = 0, j = 0; k < data.length; k++) { i = (i + 1) & 255; j = (j + s[i]) & 255; [s[i], s[j]] = [s[j], s[i]]; out[k] = data[k] ^ s[(s[i] + s[j]) & 255]; }
+    return out;
+  }
+  const cat = (...parts) => { const out = new Uint8Array(parts.reduce((a, p) => a + p.length, 0)); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; } return out; };
+  const subtle = () => (globalThis.crypto && globalThis.crypto.subtle) || null;
+  async function aesDecrypt(key, iv, data, padded = true) {
+    const k = await subtle().importKey('raw', key, 'AES-CBC', false, ['encrypt', 'decrypt']);
+    if (!padded) { // no padding in the data: add the block that PKCS#7 would expect
+      const last = data.length >= 16 ? data.subarray(data.length - 16) : iv;
+      data = cat(data, new Uint8Array(await subtle().encrypt({ name: 'AES-CBC', iv: last }, k, new Uint8Array(0))));
+    }
+    return new Uint8Array(await subtle().decrypt({ name: 'AES-CBC', iv }, k, data));
+  }
+  async function aesEncryptRaw(key, iv, data) {
+    const k = await subtle().importKey('raw', key, 'AES-CBC', false, ['encrypt']);
+    return new Uint8Array(await subtle().encrypt({ name: 'AES-CBC', iv }, k, data)).subarray(0, data.length);
+  }
+  const PAD = binBytes('\x28\xbf\x4e\x5e\x4e\x75\x8a\x41\x64\x00\x4e\x56\xff\xfa\x01\x08\x2e\x2e\x00\xb6\xd0\x68\x3e\x80\x2f\x0c\xa9\xfe\x64\x53\x69\x7a');
+  /** Hash of revision 6 (ISO 32000-2, algorithm 2.B) for the empty user password. */
+  async function hash6(salt) {
+    let K = new Uint8Array(await subtle().digest('SHA-256', salt));
+    for (let i = 0; ; i++) {
+      const K1 = new Uint8Array(K.length * 64);
+      for (let r = 0; r < 64; r++) K1.set(K, r * K.length);
+      const E = await aesEncryptRaw(K.subarray(0, 16), K.subarray(16, 32), K1);
+      let sum = 0; for (let j = 0; j < 16; j++) sum += E[j];
+      K = new Uint8Array(await subtle().digest(['SHA-256', 'SHA-384', 'SHA-512'][sum % 3], E));
+      if (i >= 63 && E[E.length - 1] <= i + 1 - 32) return K.subarray(0, 32);
+    }
+  }
+  /** Returns a stream decryptor for the file, or throws 'pdf-encrypted' when a real password is needed. */
+  async function pdfDecryptor(enc, id0) {
+    if (!enc || enc.Filter !== '/Standard') throw new Error('pdf-encrypted');
+    const R = enc.R || 2, V = enc.V || 0;
+    const O = binBytes((enc.O || {}).s || ''), U = binBytes((enc.U || {}).s || '');
+    const cf = enc.CF && enc.StmF && enc.CF[String(enc.StmF).slice(1)];
+    const method = enc.StmF === '/Identity' ? 'none' : cf ? cf.CFM : V >= 4 ? '/V2' : '/V2';
+    if (method === 'none') return async (data) => data;
+    if (R >= 5) {
+      if (!subtle()) throw new Error('pdf-encrypted');
+      const vs = U.subarray(32, 40), ks = U.subarray(40, 48);
+      const check = R === 5 ? new Uint8Array(await subtle().digest('SHA-256', vs)) : await hash6(vs);
+      if (check.some((b, i) => b !== U[i])) throw new Error('pdf-encrypted');
+      const ik = R === 5 ? new Uint8Array(await subtle().digest('SHA-256', ks)) : await hash6(ks);
+      const key = await aesDecrypt(ik, new Uint8Array(16), binBytes((enc.UE || {}).s || ''), false);
+      return async (data) => (data.length < 32 ? new Uint8Array(0) : aesDecrypt(key.subarray(0, 32), data.subarray(0, 16), data.subarray(16)));
+    }
+    const n = R === 2 ? 5 : (enc.Length || 40) / 8;
+    const P = enc.P | 0;
+    let key = md5(cat(PAD, O.subarray(0, 32), new Uint8Array([P & 255, (P >> 8) & 255, (P >> 16) & 255, (P >>> 24) & 255]), id0,
+      R >= 4 && enc.EncryptMetadata === false ? new Uint8Array([255, 255, 255, 255]) : new Uint8Array(0))).subarray(0, n);
+    if (R >= 3) for (let i = 0; i < 50; i++) key = md5(key).subarray(0, n);
+    // Check the key against U: a wrong key means the file needs a real password.
+    let u;
+    if (R === 2) u = rc4(key, PAD);
+    else { u = rc4(key, md5(cat(PAD, id0))); for (let i = 1; i <= 19; i++) u = rc4(key.map((b) => b ^ i), u); }
+    for (let i = 0; i < (R === 2 ? 32 : 16); i++) if (u[i] !== U[i]) throw new Error('pdf-encrypted');
+    const aes = method === '/AESV2';
+    if (aes && !subtle()) throw new Error('pdf-encrypted');
+    return async (data, num, gen) => {
+      const k = md5(cat(key, new Uint8Array([num & 255, (num >> 8) & 255, (num >> 16) & 255, gen & 255, (gen >> 8) & 255]), aes ? binBytes('sAlT') : new Uint8Array(0))).subarray(0, Math.min(n + 5, 16));
+      if (!aes) return rc4(k, data);
+      return data.length < 32 ? new Uint8Array(0) : aesDecrypt(k, data.subarray(0, 16), data.subarray(16));
+    };
+  }
+
   /** Every object of the file: number → { v, data } (data: raw stream bytes, still encoded). */
   async function pdfObjects(bytes) {
     const s = bin(bytes);
@@ -730,7 +826,7 @@
     let m;
     while ((m = re.exec(s))) {
       const { v, end } = pdfValue(s, m.index + m[0].length);
-      const o = { v };
+      const o = { v, num: Number(m[1]), gen: Number(m[2]) };
       const sm = /^\s*stream\r?\n/.exec(s.slice(end, end + 12));
       if (sm && v && typeof v === 'object') {
         const start = end + sm[0].length;
@@ -741,7 +837,16 @@
       }
       objs.set(Number(m[1]), o);
     }
-    if (/\/Encrypt\s/.test(s.slice(s.lastIndexOf('trailer') >= 0 ? s.lastIndexOf('trailer') : 0)) || [...objs.values()].some((o) => o.v && o.v.Type === '/XRef' && o.v.Encrypt)) throw new Error('pdf-encrypted');
+    // Encryption: the trailer (or the cross-reference stream) points to it.
+    const tpos = s.lastIndexOf('trailer');
+    const trailer = tpos >= 0 ? pdfValue(s, tpos + 7).v : null;
+    const xref = [...objs.values()].map((o) => o.v).filter((v) => v && v.Type === '/XRef' && v.Encrypt).pop();
+    const tr = trailer && trailer.Encrypt ? trailer : xref;
+    if (tr) {
+      const id = Array.isArray(tr.ID) && tr.ID[0] ? binBytes(tr.ID[0].s || '') : new Uint8Array(0);
+      objs.decrypt = await pdfDecryptor(deref(tr.Encrypt, objs), id);
+      objs.encryptRef = tr.Encrypt && tr.Encrypt.ref;
+    }
     // Objects packed inside object streams.
     for (const o of [...objs.values()]) {
       if (!o.data || !o.v || o.v.Type !== '/ObjStm') continue;
@@ -759,6 +864,9 @@
     let f = deref(o.v.Filter, objs);
     f = Array.isArray(f) ? f : f ? [f] : [];
     let data = o.data;
+    if (objs.decrypt && o.v.Type !== '/XRef' && o.num !== objs.encryptRef) {
+      try { data = await objs.decrypt(data, o.num, o.gen); } catch (e) { return null; }
+    }
     for (const name of f) {
       if (name === '/FlateDecode' || name === '/Fl') data = await inflate(data);
       else if (name === '/ASCII85Decode' || name === '/A85') data = ascii85(data);

@@ -1,5 +1,6 @@
 // Checks the PDF statement reader on made-up statements shaped like RBC's
-// (tests/fixtures: English chequing on 2 pages, Visa, French chequing with an embedded font).
+// (tests/fixtures: English chequing on 2 pages, Visa, French chequing with an embedded font,
+// and the Visa one encrypted the way banks do, with an empty open password).
 // Run from the repo root: node tests/pdf_import_test.mjs
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
@@ -39,6 +40,12 @@ assert.deepEqual(await read('rbc-cheques-fr.pdf'), [
 const st = await I.readPdfStatement(readFileSync(new URL('./fixtures/rbc-visa-en.pdf', import.meta.url)));
 assert.equal(st.count, 4);
 assert.equal(I.toTransactions(st.rows, { date: 0, desc: [1], amount: 2, debit: -1, credit: -1 }, false).length, 4);
+
+// Protected with an empty open password (opens without asking): RC4, AES-128 and AES-256 (revision 6).
+const visa = await read('rbc-visa-en.pdf');
+for (const alg of ['rc4-128', 'aes-128', 'aes-256']) assert.deepEqual(await read(`rbc-visa-${alg}.pdf`), visa, alg);
+// A real password: refused with a clear error.
+await assert.rejects(read('rbc-visa-real-password.pdf'), /pdf-encrypted/);
 
 await assert.rejects(I.readPdfText(new TextEncoder().encode('not a pdf')), /not-pdf/);
 
