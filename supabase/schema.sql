@@ -61,7 +61,7 @@ create table if not exists public.holdings (
   id uuid primary key default gen_random_uuid(),
   symbol text not null,
   name text,
-  market text not null check (market in ('TSX', 'TSXV', 'NEO', 'US', 'MANUAL', 'CASH')),
+  market text not null check (market in ('TSX', 'TSXV', 'NEO', 'US', 'CRYPTO', 'MANUAL', 'CASH')),
   currency text not null default 'CAD' check (currency in ('CAD', 'USD')),
   qty numeric not null check (qty >= 0),
   avg_cost numeric check (avg_cost >= 0),
@@ -187,6 +187,9 @@ create table if not exists public.expense_log (
 -- Columns added after the first version (safe on a fresh or existing database).
 alter table public.holdings add column if not exists child_id uuid references public.children (id) on delete set null;
 alter table public.holdings add column if not exists project_id uuid references public.projects (id) on delete set null;
+-- CRYPTO (BTC, ETH…): priced every weekday in USD by the daily job.
+alter table public.holdings drop constraint if exists holdings_market_check;
+alter table public.holdings add constraint holdings_market_check check (market in ('TSX', 'TSXV', 'NEO', 'US', 'CRYPTO', 'MANUAL', 'CASH'));
 alter table public.budget_items add column if not exists nature text not null default 'fixed';
 alter table public.budget_items add column if not exists child_id uuid references public.children (id) on delete set null;
 alter table public.budget_items add column if not exists gross boolean not null default false;

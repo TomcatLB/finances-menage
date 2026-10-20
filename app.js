@@ -17,6 +17,7 @@
     TSXV: { label: 'TSX croissance', cur: 'CAD', auto: true },
     NEO: { label: 'Cboe Canada (ex-NEO)', cur: 'CAD', auto: true },
     US: { label: 'NYSE / Nasdaq (É.-U.)', cur: 'USD', auto: true },
+    CRYPTO: { label: 'Cryptomonnaie (BTC, ETH… prix en USD chaque jour)', cur: 'USD', auto: true },
     MANUAL: { label: 'Placement privé ou prix entré à la main (fonds commun, crypto…)', cur: null, auto: false },
     CASH: { label: 'Encaisse dans le compte', cur: null, auto: false },
   };
@@ -133,7 +134,7 @@
     const m = (e && (e.message || e.error_description)) || String(e);
     if (/row-level security|permission denied/i.test(m)) return "Ce compte n'a pas accès à ces données.";
     if (/Failed to fetch|NetworkError/i.test(m)) return 'Connexion impossible. Vérifie ta connexion Internet.';
-    if (/column .* does not exist|Could not find the .* column/i.test(m)) return 'La base de données doit être mise à jour : dans Supabase, relance le fichier supabase/schema.sql (SQL Editor → Run).';
+    if (/column .* does not exist|Could not find the .* column|holdings_market_check/i.test(m)) return 'La base de données doit être mise à jour : dans Supabase, relance le fichier supabase/schema.sql (SQL Editor → Run).';
     return m;
   }
 
@@ -522,7 +523,7 @@
   function holdingMix(hd) {
     if (hd.asset_class && CLASSES[hd.asset_class]) return { [hd.asset_class]: 1 };
     if (hd.market === 'CASH') return { cash: 1 };
-    if (hd.market === 'MANUAL') return { other: 1 };
+    if (hd.market === 'MANUAL' || hd.market === 'CRYPTO') return { other: 1 };
     return ETF_MIX[String(hd.symbol || '').toUpperCase()] || { equity: 1 };
   }
 
@@ -2386,6 +2387,7 @@
         }
         const upd = { qty: row.qty };
         if (row.avg_cost !== null) upd.avg_cost = row.avg_cost;
+        if (row.market !== it.match.market || row.currency !== it.match.currency) Object.assign(upd, { market: row.market, currency: row.currency }); // e.g. BTC first saved on the TSX
         if (row.market === 'MANUAL') {
           upd.manual_price = row.manual_price;
           upd.manual_price_date = row.manual_price_date;

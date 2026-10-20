@@ -510,8 +510,12 @@
     if (/^(neo|ne|cboe|cboecanada|aequitas|neoexchange)$/.test(x)) return 'NEO';
     if (/^(tsx|tse|to|xtse|tor|toronto|boursedetoronto|torontostockexchange|canada|can|ca)$/.test(x)) return 'TSX';
     if (/^(nyse|nasdaq|us|usa|eu|etatsunis|arca|nysearca|bats|amex|nysemkt|nysemarket|nasdaqgs|nasdaqgm|nasdaqcm|otc)$/.test(x)) return 'US';
+    if (/^(crypto|cryptomonnaie|cryptocurrency)$/.test(x)) return 'CRYPTO';
     return null;
   }
+
+  // Bare BTC/ETH, or any coin written as a USD pair. Other bare tickers (SOL, DOT…) are also stock symbols.
+  const CRYPTO_PAIR = /^(?:(BTC|XBT|ETH)|(BTC|XBT|ETH|SOL|ADA|XRP|DOGE|LTC|DOT|AVAX|LINK)(?:-?USD|=))$/;
 
   /**
    * Splits "XEQT.TO", "TSX:XEQT", "BAM-A.TO" into the app's symbol and market.
@@ -532,6 +536,8 @@
     if (m && !m[1].endsWith('.')) { s = m[1]; market = 'US'; }
     m = s.match(/^(.+)-(T|CT)$/); // some banks write XEQT-T for Toronto
     if (m && !market) { s = m[1]; market = 'TSX'; }
+    m = !market && s.match(CRYPTO_PAIR); // BTC, BTC-USD, BTCUSD, BTC= (Refinitiv)
+    if (m) return { symbol: m[1] || m[2], market: 'CRYPTO' };
     s = s.replace(/_/g, '.');
     return { symbol: s.replace(/-/g, '.'), market };
   }
@@ -541,7 +547,6 @@
 
   const CASH_WORDS = /^(cash|encaisse|especes|liquidites|liquidite|argentcomptant|soldecomptant|soldedetresorerie|cad|usd|cad\$|usd\$|cashcad|cashusd|comptant)$/;
   const USD_CAD_RANGE = [1.15, 1.75];
-  const CRYPTO = /^(BTC|XBT|ETH|SOL|ADA|XRP|DOGE|LTC|DOT|AVAX|LINK|MATIC|USDC|USDT)$/;
   const TOTAL_ROW = /^(total|soustotal|grandtotal|totaux|sommaire|summary)/;
   const r4 = (x) => Math.round(x * 10000) / 10000;
 
@@ -599,7 +604,6 @@
         }
         if (!sym) return push({ ok: false, line, label: label || `Ligne ${line}`, reason: 'Symbole manquant' });
         const sp = splitSymbol(sym);
-        if (CRYPTO.test(sp.symbol) && !sp.market) return push({ ok: false, line, label: sp.symbol, reason: 'Cryptomonnaie : importe-la dans Placements privés (avec sa valeur marchande)' });
         if (notListed(sp.symbol)) return push({ ok: false, line, label: sp.symbol, reason: 'Fonds ou billet non coté en bourse : importe-le dans Placements privés (avec sa valeur marchande)' });
         let market = sp.market || mapMarket(cell(r, 'market'));
         if (market === 'CSE') return push({ ok: false, line, label: sp.symbol, reason: 'Bourse des valeurs canadiennes (CSE) : ajoute-le comme placement privé' });
@@ -608,7 +612,7 @@
         if (qty === null && value !== null && price) qty = value / price;
         if (qty === null || !(qty > 0)) return push({ ok: false, line, label: sp.symbol, reason: 'Quantité manquante ou nulle' });
         const avgCost = avg !== null ? avg : book !== null ? book / qty : null;
-        return push({ ok: true, line, label: sp.symbol, row: { ...base, market, symbol: sp.symbol, currency: market === 'US' || /\.U$/.test(sp.symbol) ? 'USD' : 'CAD', name: name && name !== sym ? name : null, qty: r4(qty), avg_cost: avgCost === null ? null : r4(Math.abs(avgCost)) } });
+        return push({ ok: true, line, label: sp.symbol, row: { ...base, market, symbol: sp.symbol, currency: market === 'US' || market === 'CRYPTO' || /\.U$/.test(sp.symbol) ? 'USD' : 'CAD', name: name && name !== sym ? name : null, qty: r4(qty), avg_cost: avgCost === null ? null : r4(Math.abs(avgCost)) } });
       }
       // Private: valued by hand. A single value is stored as 1 unit at that price.
       if (!label) return push({ ok: false, line, label: `Ligne ${line}`, reason: 'Nom manquant' });
@@ -687,7 +691,7 @@
         matched.add(match.id);
         row.account = match.account; // an update never moves a holding to another account or owner
         row.owner = match.owner;
-        const same = near(match.qty, row.qty) && (row.avg_cost === null || near(match.avg_cost, row.avg_cost))
+        const same = near(match.qty, row.qty) && (row.avg_cost === null || near(match.avg_cost, row.avg_cost)) && match.market === row.market && match.currency === row.currency
           && (row.market !== 'MANUAL' || (near(match.manual_price, row.manual_price) && (!row.manual_price_date || match.manual_price_date === row.manual_price_date)));
         status = same ? 'same' : 'update';
       }

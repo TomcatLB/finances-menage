@@ -16,6 +16,13 @@ assert.deepEqual(split('ARKK.K'), { symbol: 'ARKK', market: 'US' });
 assert.deepEqual(split('BRK.B.N'), { symbol: 'BRK.B', market: 'US' });
 assert.deepEqual(split('QETH_U'), { symbol: 'QETH.U', market: null });
 assert.deepEqual(split('QETH-U.TO'), { symbol: 'QETH.U', market: 'TSX' });
+// Crypto: priced every day in USD (Yahoo BTC-USD).
+assert.deepEqual(split('BTC'), { symbol: 'BTC', market: 'CRYPTO' });
+assert.deepEqual(split('ETH-USD'), { symbol: 'ETH', market: 'CRYPTO' });
+assert.deepEqual(split('BTC='), { symbol: 'BTC', market: 'CRYPTO' });
+assert.deepEqual(split('SOL-USD'), { symbol: 'SOL', market: 'CRYPTO' });
+assert.deepEqual(split('SOL'), { symbol: 'SOL', market: null }); // also a stock symbol
+assert.deepEqual(split('TSX:BTC'), { symbol: 'BTC', market: 'TSX' });
 
 const rows = [
   ['Compte', 'Symbole', 'Quantité', 'Coût moyen', 'Marché', 'Valeur marchande'],
@@ -64,20 +71,19 @@ console.log('Import symbol formats OK');
   const cols = I.detectHoldingColumns(sheet.rows[header]);
   const pub = I.toHoldings(sheet.rows, header, cols, { kind: 'public', owner: 'p1', account: 'Non enregistré', market: 'TSX' });
   const ok = pub.filter((c) => c.ok).map((c) => `${c.row.symbol}:${c.row.market}:${c.row.currency}`);
-  assert.deepEqual(ok, ['XEQT:TSX:CAD', 'AAPL:US:USD', 'QETH.U:TSX:USD']);
+  assert.deepEqual(ok, ['XEQT:TSX:CAD', 'AAPL:US:USD', 'QETH.U:TSX:USD', 'BTC:CRYPTO:USD']);
+  assert.equal(pub.find((c) => c.label === 'BTC').row.avg_cost, 50000);
   const reasons = Object.fromEntries(pub.filter((c) => !c.ok).map((c) => [c.label, c.reason]));
   assert.match(reasons.CASH, /Dettes/);
-  assert.match(reasons.BTC, /Cryptomonnaie/);
   assert.match(reasons.FUNDA1, /Placements privés/);
-  assert.equal(Object.keys(reasons).length, 6); // cash, 2 funds, crypto, partnership (no units), note (no symbol); nothing under the total
+  assert.equal(Object.keys(reasons).length, 5); // cash, 2 funds, partnership (no units), note (no symbol); nothing under the total
 
   const priv = I.toHoldings(sheet.rows, header, cols, { kind: 'private', owner: 'p1', account: 'Non enregistré', date: '2026-10-15',
-    publicSymbols: new Set(['XEQT', 'AAPL', 'QETH.U']) });
+    publicSymbols: new Set(['XEQT', 'AAPL', 'QETH.U', 'BTC']) });
   const got = Object.fromEntries(priv.filter((c) => c.ok).map((c) => [c.row.name, c.row]));
-  assert.deepEqual(Object.keys(got), ['SAMPLE USD FUND LP', 'SAMPLE CAD FUND', 'BITCOIN', 'SAMPLE PARTNERSHIP', 'SAMPLE NOTE']);
+  assert.deepEqual(Object.keys(got), ['SAMPLE USD FUND LP', 'SAMPLE CAD FUND', 'SAMPLE PARTNERSHIP', 'SAMPLE NOTE']);
   // Value 2100 = 10 × 150 × 1.4: kept as a USD price so the daily rate applies.
   assert.deepEqual([got['SAMPLE USD FUND LP'].currency, got['SAMPLE USD FUND LP'].manual_price, got['SAMPLE USD FUND LP'].avg_cost], ['USD', 150, 100]);
-  assert.deepEqual([got.BITCOIN.currency, got.BITCOIN.manual_price], ['USD', 100000]);
   assert.deepEqual([got['SAMPLE CAD FUND'].currency, got['SAMPLE CAD FUND'].manual_price], ['CAD', 12]);
   // A partnership with only a book and a market value: one unit at that value, even if its symbol is a listed title.
   assert.deepEqual([got['SAMPLE PARTNERSHIP'].qty, got['SAMPLE PARTNERSHIP'].manual_price, got['SAMPLE PARTNERSHIP'].avg_cost], [1, 8000, 5000]);
@@ -89,5 +95,14 @@ assert.equal(I.asOfDate([['LIVE PORTFOLIO', '', 'As of', '09-22-2026'], ['Symbol
 assert.equal(I.asOfDate([['Date', 'Symbol'], ['2026-10-01', 'XEQT']], 0), null); // a column title, not a date above the table
 assert.equal(I.asOfDate([['En date du : 2026-10-20'], ['Symbole', 'Quantité']], 1), '2026-10-20');
 assert.equal(I.asOfDate([['As of', '46315'], ['Symbol', 'Units']], 1), '2026-10-20');
+
+// Re-importing BTC first saved on the TSX moves it to the crypto market.
+{
+  const cand = I.toHoldings([['Symbol', 'Units', 'Avg cost'], ['BTC', '0.1', '50000']], 0, I.detectHoldingColumns(['Symbol', 'Units', 'Avg cost']),
+    { kind: 'public', owner: 'p1', account: 'Non enregistré', market: 'TSX' });
+  const plan = I.planSync(cand, [{ id: 'h1', market: 'TSX', symbol: 'BTC', currency: 'CAD', qty: 0.1, avg_cost: 50000, account: 'Non enregistré', owner: 'p1' }]);
+  assert.equal(plan.items[0].status, 'update');
+  assert.equal(plan.items[0].row.market, 'CRYPTO');
+}
 
 console.log('Live portfolio workbook OK');

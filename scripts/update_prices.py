@@ -20,7 +20,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-AUTO_SUFFIX = {"TSX": ".TO", "TSXV": ".V", "NEO": ".NE", "US": ""}
+AUTO_SUFFIX = {"TSX": ".TO", "TSXV": ".V", "NEO": ".NE", "US": "", "CRYPTO": "-USD"}
+USD_MARKETS = ("US", "CRYPTO")
 TORONTO = ZoneInfo("America/Toronto")
 MARKET_CLOSE_BUFFER = dt.time(16, 20)  # a bar for "today" before this time is still intraday
 BOC_URL = "https://www.bankofcanada.ca/valet/observations/FXUSDCAD/json"
@@ -62,7 +63,7 @@ def _check(r: requests.Response, what: str) -> None:
 # Prices
 # ----------------------------------------------------------------------------
 def yahoo_symbol(market: str, symbol: str) -> str:
-    """XEQT on TSX -> XEQT.TO; class shares use a dash on Yahoo: BAM.A -> BAM-A.TO, BRK.B -> BRK-B."""
+    """XEQT on TSX -> XEQT.TO; class shares use a dash on Yahoo: BAM.A -> BAM-A.TO, BRK.B -> BRK-B; BTC -> BTC-USD."""
     return symbol.strip().upper().replace(".", "-") + AUTO_SUFFIX[market]
 
 
@@ -232,7 +233,7 @@ def main() -> int:
             "symbol_key": key_,
             "close": close,
             "prev_close": prev,
-            "currency": "USD" if market == "US" else "CAD",
+            "currency": "USD" if market in USD_MARKETS else "CAD",
             "price_date": close_date.isoformat(),
             "source": "Yahoo Finance (yfinance)",
             "fetched_at": now_iso,
@@ -268,7 +269,8 @@ def main() -> int:
         "assets": db.get("assets"),
         "debts": db.get("debts"),
     }
-    stock_dates = [prices[k]["price_date"] for k in wanted if k in prices]
+    # Crypto trades every day: its date says nothing about the last market close.
+    stock_dates = [prices[k]["price_date"] for k in wanted if k in prices and wanted[k][0] != "CRYPTO"]
     snap_date = max(stock_dates) if stock_dates else now_et.date().isoformat()
     db.upsert(
         "snapshots",
