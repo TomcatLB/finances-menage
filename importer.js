@@ -864,6 +864,9 @@
     let f = deref(o.v.Filter, objs);
     f = Array.isArray(f) ? f : f ? [f] : [];
     let data = o.data;
+    const len = deref(o.v.Length, objs);
+    if (typeof len === 'number' && len <= data.length) data = data.subarray(0, len);
+    else { let e = data.length; while (e > 0 && (data[e - 1] === 10 || data[e - 1] === 13)) e--; data = data.subarray(0, e); }
     if (objs.decrypt && o.v.Type !== '/XRef' && o.num !== objs.encryptRef) {
       try { data = await objs.decrypt(data, o.num, o.gen); } catch (e) { return null; }
     }
@@ -903,23 +906,72 @@
     return { map, bytes };
   }
   const WIN = { 128: '€', 130: '‚', 132: '„', 133: '…', 145: '‘', 146: '’', 147: '“', 148: '”', 150: '–', 151: '—', 153: '™', 156: 'œ' };
+  const MAC = 'ÄÅÇÉÑÖÜáàâäãåçéèêëíìîïñóòôöõúùûü†°¢£§•¶ß®©™´¨≠ÆØ∞±≤≥¥µ∂∑∏π∫ªºΩæø¿¡¬√ƒ≈∆«»… ÀÃÕŒœ–—“”‘’÷◊ÿŸ⁄€‹›ﬁﬂ‡·‚„‰ÂÊÁËÈÍÎÏÌÓÔÒÚÛÙıˆ˜¯˘˙˚¸˝˛ˇ';
+  const ACCENTS = { acute: '\u0301', grave: '\u0300', circumflex: '\u0302', dieresis: '\u0308', tilde: '\u0303', cedilla: '\u0327', ring: '\u030a', caron: '\u030c' };
+  const GLYPHS = { space: ' ', quoteright: '’', quoteleft: '‘', quotesingle: "'", quotedbl: '"', quotedblleft: '“', quotedblright: '”', endash: '–', emdash: '—', hyphen: '-', minus: '-',
+    bullet: '•', ellipsis: '…', Euro: '€', registered: '®', copyright: '©', trademark: '™', degree: '°', section: '§', guillemotleft: '«', guillemotright: '»', germandbls: 'ß',
+    oe: 'œ', OE: 'Œ', ae: 'æ', AE: 'Æ', dollar: '$', percent: '%', ampersand: '&', parenleft: '(', parenright: ')', comma: ',', period: '.', colon: ':', semicolon: ';', slash: '/', at: '@',
+    numbersign: '#', asterisk: '*', plus: '+', equal: '=', underscore: '_', nbspace: ' ', zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9' };
+  /** Unicode text of a glyph name (/eacute → é, /uni00E9 → é). */
+  function glyphText(name) {
+    const n = String(name).replace(/^\//, '');
+    if (GLYPHS[n]) return GLYPHS[n];
+    if (/^[A-Za-z]$/.test(n)) return n;
+    let m = /^uni([0-9A-F]{4})$/i.exec(n);
+    if (m) return String.fromCharCode(parseInt(m[1], 16));
+    m = /^([A-Za-z])(acute|grave|circumflex|dieresis|tilde|cedilla|ring|caron)$/.exec(n);
+    if (m) return (m[1] + ACCENTS[m[2]]).normalize('NFC');
+    return '';
+  }
+
+  /** A font's text decoder and glyph widths: { dec(bytes) → text, width(bytes) → width at size 1, exact }. */
   async function fontDecoder(fontRef, objs, cache) {
     const key = fontRef && fontRef.ref;
     if (key && cache.has(key)) return cache.get(key);
     const f = deref(fontRef, objs) || {};
-    let dec;
+    const type0 = f.Subtype === '/Type0';
     const tu = f.ToUnicode && f.ToUnicode.ref ? objs.get(f.ToUnicode.ref) : null;
     const raw = tu ? await pdfStream(tu, objs) : null;
-    if (raw) {
-      const cm = parseCMap(bin(raw));
-      dec = (str) => { let o = ''; for (let i = 0; i + cm.bytes <= str.length; i += cm.bytes) { let c = 0; for (let k = 0; k < cm.bytes; k++) c = c * 256 + str.charCodeAt(i + k); o += cm.map.has(c) ? cm.map.get(c) : ''; } return o; };
-    } else if (f.Subtype === '/Type0') {
-      dec = (str) => { let o = ''; for (let i = 0; i + 1 < str.length; i += 2) { const c = str.charCodeAt(i) * 256 + str.charCodeAt(i + 1); if (c >= 32 && c < 0xd800) o += String.fromCharCode(c); } return o; };
-    } else {
-      dec = (str) => { let o = ''; for (const ch of str) { const c = ch.charCodeAt(0); o += WIN[c] || (c >= 32 ? ch : ''); } return o; };
+    const cm = raw ? parseCMap(bin(raw)) : null;
+    const step = cm ? cm.bytes : type0 ? 2 : 1;
+    const codes = (str) => { const out = []; for (let i = 0; i + step <= str.length; i += step) { let c = 0; for (let k = 0; k < step; k++) c = c * 256 + str.charCodeAt(i + k); out.push(c); } return out; };
+    // Codes the ToUnicode map leaves out (often the accented letters): the font's encoding, else Windows-1252.
+    const enc = deref(f.Encoding, objs);
+    const base = typeof enc === 'string' ? enc : enc && enc.BaseEncoding;
+    const diff = new Map();
+    if (enc && Array.isArray(enc.Differences)) { let c = 0; for (const d of enc.Differences) { if (typeof d === 'number') c = d; else diff.set(c++, glyphText(d)); } }
+    const fallback = (c) => {
+      if (type0 || step > 1) return c >= 32 && c < 0xd800 ? String.fromCharCode(c) : '';
+      if (diff.has(c)) return diff.get(c);
+      if (base === '/MacRomanEncoding' && c >= 128) return MAC[c - 128];
+      return WIN[c] || (c >= 32 ? String.fromCharCode(c) : '');
+    };
+    const dec = (str) => codes(str).map((c) => (cm && cm.map.has(c) ? cm.map.get(c) : fallback(c))).join('');
+    // Widths (thousandths of the font size), for where each piece of text ends.
+    const widths = new Map();
+    let dw = 500, exact = false;
+    if (Array.isArray(deref(f.Widths, objs))) {
+      const first = deref(f.FirstChar, objs) || 0;
+      deref(f.Widths, objs).forEach((w, i) => { if (typeof w === 'number' && w > 0) widths.set(first + i, w); });
+      exact = widths.size > 0;
+    } else if (type0) {
+      const d = deref((deref(f.DescendantFonts, objs) || [])[0], objs) || {};
+      if (typeof d.DW === 'number') dw = d.DW;
+      const W = deref(d.W, objs);
+      if (Array.isArray(W)) {
+        for (let i = 0; i < W.length;) {
+          const c = W[i];
+          const next = deref(W[i + 1], objs);
+          if (Array.isArray(next)) { next.forEach((w, k) => widths.set(c + k, w)); i += 2; }
+          else { for (let k = c; k <= next && k - c < 65536; k++) widths.set(k, W[i + 2]); i += 3; }
+        }
+      }
+      exact = true;
     }
-    if (key) cache.set(key, dec);
-    return dec;
+    const width = (str) => codes(str).reduce((a, c) => a + (widths.get(c) ?? dw), 0) / 1000;
+    const font = { dec, width, exact };
+    if (key) cache.set(key, font);
+    return font;
   }
 
   /** Splits a content stream into operands and operators. */
@@ -952,14 +1004,16 @@
     const fonts = deref(res.Font, objs) || {};
     const xobjs = deref(res.XObject, objs) || {};
     const s = bin(data);
-    let ctm = ctm0, stack = [], tm = [1, 0, 0, 1, 0, 0], tlm = tm, lead = 0, size = 12, dec = (x) => x, ops = [];
+    let ctm = ctm0, stack = [], tm = [1, 0, 0, 1, 0, 0], tlm = tm, lead = 0, size = 12, ops = [];
+    let font = { dec: (x) => x, width: (x) => x.length * 0.5, exact: false };
     const show = (str) => {
-      const text = dec(str);
-      if (!text) return;
+      const text = font.dec(str);
+      const adv = font.width(str) * size;
       const m = mul(tm, ctm);
-      const scale = Math.hypot(m[2], m[3]) || 1;
-      out.push({ x: m[4], y: m[5], size: size * scale, str: text });
-      tm = [tm[0], tm[1], tm[2], tm[3], tm[4] + text.length * size * 0.5 * tm[0], tm[5] + text.length * size * 0.5 * tm[1]];
+      tm = [tm[0], tm[1], tm[2], tm[3], tm[4] + adv * tm[0], tm[5] + adv * tm[1]];
+      if (!text || Math.abs(m[1]) > Math.abs(m[0])) return; // nothing to show, or vertical text (margin codes)
+      const scale = Math.hypot(m[0], m[1]) || 1;
+      out.push({ x: m[4], y: m[5], end: m[4] + adv * scale, size: size * (Math.hypot(m[2], m[3]) || 1), str: text, exact: font.exact });
     };
     let arr = null;
     for (const tk of contentTokens(s)) {
@@ -973,7 +1027,7 @@
         case 'Q': ctm = stack.pop() || ctm0; break;
         case 'cm': ctm = mul([num(6), num(5), num(4), num(3), num(2), num(1)], ctm); break;
         case 'BT': tm = tlm = [1, 0, 0, 1, 0, 0]; break;
-        case 'Tf': size = num(1); dec = await fontDecoder(fonts[String((ops[ops.length - 2] || {}).v).slice(1)], objs, ctx.fonts); break;
+        case 'Tf': size = num(1); font = await fontDecoder(fonts[String((ops[ops.length - 2] || {}).v).slice(1)], objs, ctx.fonts); break;
         case 'TL': lead = num(1); break;
         case 'Td': tm = tlm = mul([1, 0, 0, 1, num(2), num(1)], tlm); break;
         case 'TD': lead = -num(1); tm = tlm = mul([1, 0, 0, 1, num(2), num(1)], tlm); break;
@@ -1045,11 +1099,21 @@
       const tol = Math.max(2, it.size * 0.35);
       let line = lines.find((l) => Math.abs(l.y - it.y) <= tol);
       if (!line) { line = { y: it.y, items: [] }; lines.push(line); }
-      line.items.push({ x: it.x, end: it.x + it.str.length * it.size * 0.5, str: it.str });
+      line.items.push({ x: it.x, end: it.end, str: it.str, exact: it.exact, size: it.size });
     }
     lines.sort((a, b) => b.y - a.y);
     for (const l of lines) {
       l.items.sort((a, b) => a.x - b.x);
+      // Join pieces of one word (an accent in another font, a kerned letter) when their widths are known.
+      const merged = [];
+      for (const it of l.items) {
+        const last = merged[merged.length - 1];
+        const gap = last ? it.x - last.end : Infinity;
+        if (last && last.exact && it.exact && gap > -0.5 && gap < it.size * 0.12) { last.str += it.str; last.end = it.end; }
+        else if (last && last.exact && it.exact && gap >= it.size * 0.12 && gap < it.size * 0.6 && !/\s$/.test(last.str) && !/^\s/.test(it.str)) { last.str += ' ' + it.str; last.end = it.end; }
+        else merged.push({ ...it });
+      }
+      l.items = merged.map((i) => ({ x: i.x, end: i.end, str: i.str.trim() })).filter((i) => i.str);
       l.text = l.items.map((i) => i.str).join(' ').replace(/\s+/g, ' ').trim();
     }
     return lines;
@@ -1061,7 +1125,7 @@
     oct: 10, october: 10, octobre: 10, nov: 11, november: 11, novembre: 11, dec: 12, december: 12, decembre: 12 };
   const fold = (s) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
   const MONTH_RE = '(janv(?:ier)?|f[ée]vr?(?:ier)?|mars?|avr(?:il)?|mai|juin|juil(?:let)?|ao[uû]t?|sept?(?:embre)?|oct(?:obre)?|nov(?:embre)?|d[ée]c(?:embre)?|jan(?:uary)?|feb(?:ruary)?|march|apr(?:il)?|may|june?|july?|aug(?:ust)?|september|october|november|december)\\.?';
-  const DATE_START = new RegExp(`^(?:(\\d{1,2})\\s+${MONTH_RE}|${MONTH_RE}\\s+(\\d{1,2})(?![\\d,]))(?:\\s+(20\\d\\d))?\\b`, 'i');
+  const DATE_START = new RegExp(`^(?:(\\d{1,2})\\s+${MONTH_RE}|${MONTH_RE}\\s+(\\d{1,2})(?![\\d,]))(?:\\s+(20\\d\\d))?(?=[\\s,.)]|$)`, 'i');
   const NUM_DATE = /^(\d{4})-(\d{2})-(\d{2})\b|^(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/;
   const AMOUNT = /^(?:-\s?)?\(?-?\$?\s?\d{1,3}(?:[ ,  ]\d{3})*[.,]\d{2}\s?\$?\)?(?:\s?(?:-|CR))?$/i;
   const SKIP = /opening balance|closing balance|balance forward|solde (?:d.ouverture|de cl[oô]ture|pr[ée]c[ée]dent|report[ée]|de fermeture|final)|previous (?:statement|account) balance|new balance|nouveau solde|minimum payment|paiement minimum|^total|\btotal\b.*\$|sous-total|subtotal/i;
@@ -1086,23 +1150,43 @@
     const all = pages.flat();
     const end = periodEnd(all.slice(0, 80).map((l) => l.text).join('\n')) || periodEnd(all.map((l) => l.text).join('\n'));
     const pad = (n) => String(n).padStart(2, '0');
-    const out = [];
-    let cols = null; // { out, in, bal }: x centers of the amount columns
-    let lastDate = null, pending = '', prev = null;
     const center = (it) => (it.x + it.end) / 2;
-    const amountAtEnd = (l) => !!l && l.items.length > 1 && AMOUNT.test(l.items[l.items.length - 1].str.trim());
+    const find = (line, re) => line.items.find((i) => re.test(fold(i.str)));
+    // Table headings: a bank account has withdrawals / deposits (/ balance) columns, a card one amount column.
+    const OUT_H = /withdrawal|retrait|debit|cheques? (?:&|et) debits/, IN_H = /deposit|depot|credit/, BAL_H = /^balance|^solde/, AMT_H = /^montant|^amount/;
+    const heading = (line) => {
+      const o = find(line, OUT_H), i = find(line, IN_H), b = find(line, BAL_H), a = find(line, AMT_H);
+      if (o && i && o !== i) {
+        const right = Math.max(...[o, i, b].filter(Boolean).map((x) => x.end));
+        return { bank: true, out: center(o), in: center(i), bal: b ? center(b) : null, right: right + 15 };
+      }
+      if (a && line.items.some((x) => /description|date/.test(fold(x.str)))) return { bank: false, amt: center(a), right: a.end + 15 };
+      return null;
+    };
+    const tabled = all.some((l) => heading(l));
+    const out = [];
+    let table = null, lastDate = null, pending = '', prev = null;
+    // Items of a line inside the table (leaves out side panels to the right of it).
+    const inside = (line) => (table ? line.items.filter((i) => i.x < table.right) : line.items);
+    const isAmount = (it) => {
+      if (!AMOUNT.test(it.str.trim())) return false;
+      if (!table) return true;
+      const cs = table.bank ? [table.out, table.in, table.bal] : [table.amt];
+      return cs.some((c) => c !== null && Math.abs(center(it) - c) < 45);
+    };
+    const amountAtEnd = (l) => { if (!l) return false; const its = inside(l); return its.length > 1 && isAmount(its[its.length - 1]); };
     for (let li = 0; li < all.length; li++) {
       const line = all[li];
-      const t = fold(line.text);
-      // Column headings of a bank account (repeated on each page).
-      const head = (re) => { const it = line.items.find((i) => re.test(fold(i.str))); return it ? center(it) : null; };
-      const wOut = head(/withdrawal|retrait|debit|paiements? et retraits|cheques? (?:&|et) debits/), wIn = head(/deposit|depot|credit/), wBal = head(/^balance|^solde/);
-      if (wOut !== null && wIn !== null) { cols = { out: wOut, in: wIn, bal: wBal }; pending = ''; continue; }
+      const h = heading(line);
+      if (h) { table = h; pending = ''; continue; }
+      if (tabled && !table) continue; // before the first table: account summary, addresses
+      const items = inside(line);
+      if (!items.length) continue;
+      const t = fold(items.map((i) => i.str).join(' '));
       if (SKIP.test(t)) { pending = ''; prev = null; continue; }
       // Amounts at the end of the line.
-      const items = line.items.slice();
       const amounts = [];
-      while (items.length && AMOUNT.test(items[items.length - 1].str.trim())) amounts.unshift(items.pop());
+      while (items.length && isAmount(items[items.length - 1])) amounts.unshift(items.pop());
       let text = items.map((i) => i.str).join(' ').replace(/\s+/g, ' ').replace(/\s\$$/, '').trim();
       // Date at the start (one or two dates: transaction and posting).
       let date = null;
@@ -1122,12 +1206,13 @@
       }
       if (!amounts.length) {
         if (!lastDate && !date) continue;
-        if (text.length > 80) continue;
+        if (text.length > 80 || /^\d{10,}$/.test(text)) continue; // footnotes, card reference numbers
         const next = all[li + 1];
         // A line with only words: the start of the next transaction when that one follows right away
         // without its own date, otherwise the end of the previous description.
+        const nextText = next ? inside(next).map((i) => i.str).join(' ') : '';
         if (date) { lastDate = date; pending = text; prev = null; }
-        else if (prev && !(amountAtEnd(next) && !DATE_START.test(next.text) && !NUM_DATE.test(next.text))) prev.description = (prev.description + ' ' + text).trim();
+        else if (prev && !(amountAtEnd(next) && !DATE_START.test(nextText) && !NUM_DATE.test(nextText))) prev.description = (prev.description + ' ' + text).trim();
         else pending = (pending + ' ' + text).trim();
         continue;
       }
@@ -1137,20 +1222,19 @@
       pending = '';
       if (!description) continue;
       let amount = null;
-      if (cols) {
-        // Bank account: pick the amount in the withdrawals or deposits column; ignore the balance.
+      if (table && table.bank) {
+        // Bank account: the amount in the withdrawals or deposits column; the balance is ignored.
         for (const a of amounts) {
           const c = center(a);
           const dist = (x) => (x === null || x === undefined ? Infinity : Math.abs(c - x));
-          const near = Math.min(dist(cols.out), dist(cols.in), dist(cols.bal));
           const v = Math.abs(parseAmount(a.str.replace(/CR$/i, '')) || 0);
-          if (!v || near === dist(cols.bal)) continue;
-          amount = near === dist(cols.out) ? -v : v;
+          const near = Math.min(dist(table.out), dist(table.in), dist(table.bal));
+          if (!v || near === dist(table.bal)) continue;
+          amount = near === dist(table.out) ? -v : v;
           break;
         }
-        if (amount === null && amounts.length >= 2) amount = -Math.abs(parseAmount(amounts[0].str) || 0) || null;
       } else {
-        // Card: one amount; credits are negative or marked CR.
+        // Card: one amount; credits are negative, in parentheses or marked CR.
         const raw = amounts[0].str.trim();
         const v = parseAmount(raw.replace(/CR$/i, ''));
         if (v === null) continue;

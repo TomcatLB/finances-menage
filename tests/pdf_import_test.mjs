@@ -47,6 +47,18 @@ for (const alg of ['rc4-128', 'aes-128', 'aes-256']) assert.deepEqual(await read
 // A real password: refused with a clear error.
 await assert.rejects(read('rbc-visa-real-password.pdf'), /pdf-encrypted/);
 
+// Accented month abbreviations (« AOÛ ») right before a second date, card statement layout. Made-up lines.
+const line = (...cells) => ({ text: cells.map((c) => c[1]).join(' '), items: cells.map(([x, str]) => ({ x, end: x + str.length * 5, str, y: 0, size: 9 })) });
+assert.deepEqual(I.statementTransactions([[
+  line([60, 'Relevé du 05 AOÛT au 04 SEPT 2026']),
+  line([60, 'DATE'], [128, 'DESCRIPTION'], [320, 'MONTANT ($)']),
+  line([60, '03 AOÛ'], [95, '05 AOÛ'], [128, 'ÉPICERIE DU COIN'], [320, '39,46 $']),
+  line([60, '30 AOÛ'], [95, '01 SEPT'], [128, 'PAIEMENT - MERCI'], [320, '-500,00 $']),
+]]).map((t) => [t.date, t.description, t.amount]), [
+  ['2026-08-03', 'ÉPICERIE DU COIN', -39.46],
+  ['2026-08-30', 'PAIEMENT - MERCI', 500],
+]);
+
 await assert.rejects(I.readPdfText(new TextEncoder().encode('not a pdf')), /not-pdf/);
 
 console.log('PDF import: OK');
