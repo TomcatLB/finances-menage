@@ -300,6 +300,17 @@
     return sheets;
   }
 
+  /** The day an .xlsx was last saved (docProps/core.xml), in local time: YYYY-MM-DD, or null. */
+  async function xlsxSavedDate(buffer) {
+    const zip = unzip(buffer);
+    if (!zip['docProps/core.xml']) return null;
+    const m = (await zip['docProps/core.xml']()).match(/<dcterms:modified[^>]*>([^<]+)</);
+    const t = m ? new Date(m[1].trim()) : null;
+    if (!t || !Number.isFinite(t.getTime())) return null;
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`;
+  }
+
   function parseSheetXml(xml, strings) {
     const rows = [];
     let nextRow = 0;
@@ -457,6 +468,24 @@
     return best;
   }
 
+  /** A date written above the table ("As of 2026-10-20", "En date du : 20/10/2026"). YYYY-MM-DD or null. */
+  function asOfDate(rows, header) {
+    const label = /^(asof|asat|endate(du)?|datedu|dateduportefeuille|dateduleve|valeurau|valeursau|date|au)$/;
+    for (const r of rows.slice(0, Math.min(header, 20))) {
+      const cells = (r || []).map((c) => String(c ?? '').trim());
+      for (let i = 0; i < cells.length; i++) {
+        const m = cells[i].match(/^(.*?)[\s:]*(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})$/);
+        const [text, inCell] = m ? [m[1], m[2]] : [cells[i], null];
+        if (!label.test(plain(text))) continue;
+        const raw = inCell || cells.slice(i + 1).find(Boolean);
+        if (!raw) continue;
+        const d = excelDate(raw) || dateParserFor([raw])(raw);
+        if (d) return d;
+      }
+    }
+    return null;
+  }
+
   const ACCOUNT_RULES = [
     [/celiapp|fhsa|premiereproprie/, 'CELIAPP'],
     [/celi|tfsa/, 'CELI'],
@@ -481,10 +510,18 @@
     if (/^(neo|ne|cboe|cboecanada|aequitas|neoexchange)$/.test(x)) return 'NEO';
     if (/^(tsx|tse|to|xtse|tor|toronto|boursedetoronto|torontostockexchange|canada|can|ca)$/.test(x)) return 'TSX';
     if (/^(nyse|nasdaq|us|usa|eu|etatsunis|arca|nysearca|bats|amex|nysemkt|nysemarket|nasdaqgs|nasdaqgm|nasdaqcm|otc)$/.test(x)) return 'US';
+    if (/^(crypto|cryptomonnaie|cryptocurrency)$/.test(x)) return 'CRYPTO';
     return null;
   }
 
-  /** Splits "XEQT.TO", "TSX:XEQT", "BAM-A.TO" into the app's symbol and market. */
+  // Bare BTC/ETH, or any coin written as a USD pair. Other bare tickers (SOL, DOT…) are also stock symbols.
+  const CRYPTO_PAIR = /^(?:(BTC|XBT|ETH)|(BTC|XBT|ETH|SOL|ADA|XRP|DOGE|LTC|DOT|AVAX|LINK)(?:-?USD|=))$/;
+
+  /**
+   * Splits "XEQT.TO", "TSX:XEQT", "BAM-A.TO" into the app's symbol and market.
+   * Some brokers use Reuters suffixes for US listings: AMZN.O (Nasdaq), ARKK.K (NYSE Arca), BRK.B.N (NYSE).
+   * US-dollar units on the TSX may come as QETH_U or QETH-U: kept as QETH.U.
+   */
   function splitSymbol(raw) {
     let s = String(raw || '').trim().toUpperCase().replace(/\s+/g, '');
     let market = null;
@@ -495,12 +532,21 @@
       s = m[1];
       market = { TO: 'TSX', TSX: 'TSX', V: 'TSXV', VN: 'TSXV', NE: 'NEO', NEO: 'NEO', US: 'US', CN: 'CSE' }[m[2]];
     }
+    m = s.match(/^([A-Z][A-Z0-9.-]*)\.(O|OQ|K|N)$/);
+    if (m && !m[1].endsWith('.')) { s = m[1]; market = 'US'; }
     m = s.match(/^(.+)-(T|CT)$/); // some banks write XEQT-T for Toronto
     if (m && !market) { s = m[1]; market = 'TSX'; }
+    m = !market && s.match(CRYPTO_PAIR); // BTC, BTC-USD, BTCUSD, BTC= (Refinitiv)
+    if (m) return { symbol: m[1] || m[2], market: 'CRYPTO' };
+    s = s.replace(/_/g, '.');
     return { symbol: s.replace(/-/g, '.'), market };
   }
 
+  /** Mutual fund and note codes (TDB902, IXF903, OVB5ACC1) are not listed on an exchange: no closing price. */
+  const notListed = (symbol) => /\d/.test(symbol);
+
   const CASH_WORDS = /^(cash|encaisse|especes|liquidites|liquidite|argentcomptant|soldecomptant|soldedetresorerie|cad|usd|cad\$|usd\$|cashcad|cashusd|comptant)$/;
+  const USD_CAD_RANGE = [1.15, 1.75];
   const TOTAL_ROW = /^(total|soustotal|grandtotal|totaux|sommaire|summary)/;
   const r4 = (x) => Math.round(x * 10000) / 10000;
 
@@ -512,7 +558,7 @@
 
   /**
    * rows: the sheet; header: index of the header row; cols: from detectHoldingColumns.
-   * opts: { kind: 'public' | 'private', owner, account, market, date, ownerNames: { p1, p2 } }
+   * opts: { kind: 'public' | 'private', owner, account, market, date, ownerNames: { p1, p2 }, publicSymbols: Set (private import) }
    * Returns one candidate per data row: { ok, reason, row: {…holding fields} , line }.
    */
   function toHoldings(rows, header, cols, opts) {
@@ -534,8 +580,10 @@
       const line = header + i + 2;
       const sym = cell(r, 'symbol'), name = cell(r, 'name');
       if (!r.some((c) => String(c ?? '').trim())) return;
+      if (/^-?[\d\s.,]+$/.test(sym)) return; // summary rows under the table (a number where the symbol goes)
       if (TOTAL_ROW.test(plain(sym || name)) || (!sym && !name && TOTAL_ROW.test(plain(r.find((c) => String(c).trim()) || '')))) return;
       const qtyIn = amt(r, 'qty'), avg = amt(r, 'avg_cost'), book = amt(r, 'book_value'), price = amt(r, 'price'), value = amt(r, 'value');
+      if (!sym && [qtyIn, avg, book, price, value].every((x) => x === null)) return; // a note or a heading, not a holding
       const curRaw = plain(cell(r, 'currency'));
       let currency = /usd|^us\$?$|americain/.test(curRaw) ? 'USD' : /cad|^can|canadien/.test(curRaw) ? 'CAD' : null;
       const fileAccount = mapAccount(cell(r, 'account')), fileOwner = mapOwner(cell(r, 'owner'));
@@ -549,29 +597,41 @@
         if (CASH_WORDS.test(plain(sym)) || (!sym && CASH_WORDS.test(plain(name)))) {
           const amount = value ?? qtyIn;
           if (amount === null) return push({ ok: false, line, label: label || 'Encaisse', reason: 'Montant manquant' });
+          if (amount < 0) return push({ ok: false, line, label: label || 'Encaisse', reason: 'Solde négatif (marge) : ajoute-le dans Dettes' });
           if (!currency && /usd/.test(plain(sym || name))) currency = 'USD';
           const cur = currency || 'CAD';
           return push({ ok: true, line, label: 'Encaisse ' + cur, row: { ...base, market: 'CASH', symbol: cur, currency: cur, name: 'Encaisse', qty: r4(Math.max(0, amount)), avg_cost: null } });
         }
         if (!sym) return push({ ok: false, line, label: label || `Ligne ${line}`, reason: 'Symbole manquant' });
         const sp = splitSymbol(sym);
-        let market = mapMarket(cell(r, 'market')) || sp.market;
+        if (notListed(sp.symbol)) return push({ ok: false, line, label: sp.symbol, reason: 'Fonds ou billet non coté en bourse : importe-le dans Placements privés (avec sa valeur marchande)' });
+        let market = sp.market || mapMarket(cell(r, 'market'));
         if (market === 'CSE') return push({ ok: false, line, label: sp.symbol, reason: 'Bourse des valeurs canadiennes (CSE) : ajoute-le comme placement privé' });
         if (!market) market = currency === 'USD' ? 'US' : opts.market || 'TSX';
         let qty = qtyIn;
         if (qty === null && value !== null && price) qty = value / price;
         if (qty === null || !(qty > 0)) return push({ ok: false, line, label: sp.symbol, reason: 'Quantité manquante ou nulle' });
         const avgCost = avg !== null ? avg : book !== null ? book / qty : null;
-        return push({ ok: true, line, label: sp.symbol, row: { ...base, market, symbol: sp.symbol, currency: market === 'US' ? 'USD' : 'CAD', name: name && name !== sym ? name : null, qty: r4(qty), avg_cost: avgCost === null ? null : r4(Math.abs(avgCost)) } });
+        return push({ ok: true, line, label: sp.symbol, row: { ...base, market, symbol: sp.symbol, currency: market === 'US' || market === 'CRYPTO' || /\.U$/.test(sp.symbol) ? 'USD' : 'CAD', name: name && name !== sym ? name : null, qty: r4(qty), avg_cost: avgCost === null ? null : r4(Math.abs(avgCost)) } });
       }
       // Private: valued by hand. A single value is stored as 1 unit at that price.
       if (!label) return push({ ok: false, line, label: `Ligne ${line}`, reason: 'Nom manquant' });
-      let qty = qtyIn, px = price;
-      if (value !== null && (qty === null || qty <= 0) && px === null) { qty = 1; px = value; }
-      else if (value !== null && qty > 0 && px === null) px = value / qty;
+      // One sheet can hold both kinds: titles already saved as public holdings are left to the public import.
+      if (sym && qtyIn !== null && opts.publicSymbols && opts.publicSymbols.has(splitSymbol(sym).symbol)) return push({ ok: false, line, label, reason: 'Déjà dans Placements publics' });
+      if (CASH_WORDS.test(plain(sym || name))) return push({ ok: false, line, label, reason: 'Encaisse : importe-la avec les placements publics' });
+      if (value !== null && value < 0) return push({ ok: false, line, label, reason: 'Valeur négative : ajoute-la dans Dettes' });
+      let qty = qtyIn, px = price, rate = 1;
+      if (value !== null && qty > 0 && px > 0) {
+        // Value = units × price × rate: about 1.4 means a USD price whose value was converted to CAD in the sheet.
+        // Keep the USD price so the app applies each day's USD/CAD rate. Any other gap: trust the value.
+        const k = value / (qty * px);
+        if (currency !== 'CAD' && k > USD_CAD_RANGE[0] && k < USD_CAD_RANGE[1]) { currency = 'USD'; rate = k; }
+        else if (Math.abs(k - 1) > 0.01) px = value / qty;
+      } else if (value !== null && qty > 0 && px === null) px = value / qty;
+      else if (value !== null && (qty === null || qty <= 0) && px === null) { qty = 1; px = value; }
       else if (px !== null && (qty === null || qty <= 0)) { qty = value !== null && px ? value / px : 1; }
       if (px === null || qty === null || !(qty > 0)) return push({ ok: false, line, label, reason: 'Valeur manquante' });
-      const avgCost = avg !== null ? avg : book !== null ? book / qty : null;
+      const avgCost = avg !== null ? avg : book !== null ? book / qty / rate : null;
       const rawDate = cell(r, 'date');
       const date = excelDate(rawDate) || parseDate(rawDate) || opts.date || null;
       return push({ ok: true, line, label, row: { ...base, market: 'MANUAL', symbol: (sym || name).toUpperCase().slice(0, 40), currency: currency || 'CAD', name: name || null, qty: r4(qty), avg_cost: avgCost === null ? null : r4(Math.abs(avgCost)), manual_price: r4(px), manual_price_date: date } });
@@ -631,7 +691,7 @@
         matched.add(match.id);
         row.account = match.account; // an update never moves a holding to another account or owner
         row.owner = match.owner;
-        const same = near(match.qty, row.qty) && (row.avg_cost === null || near(match.avg_cost, row.avg_cost))
+        const same = near(match.qty, row.qty) && (row.avg_cost === null || near(match.avg_cost, row.avg_cost)) && match.market === row.market && match.currency === row.currency
           && (row.market !== 'MANUAL' || (near(match.manual_price, row.manual_price) && (!row.manual_price_date || match.manual_price_date === row.manual_price_date)));
         status = same ? 'same' : 'update';
       }
@@ -1256,7 +1316,7 @@
 
   const api = {
     parseCSV, detectColumns, parseAmount, dateParserFor, toTransactions, guessExpensesPositive, merchantKey, suggestCategory, analyze,
-    readPdfText, statementTransactions, readPdfStatement, unzip, readXlsx, parseSheetXml, writeXlsx, sheetsCsvUrl, detectHoldingColumns, findHeaderRow, mapAccount, mapMarket, splitSymbol, toHoldings, holdingIdentity, holdingKey, planSync,
+    readPdfText, statementTransactions, readPdfStatement, unzip, readXlsx, xlsxSavedDate, asOfDate, parseSheetXml, writeXlsx, sheetsCsvUrl, detectHoldingColumns, findHeaderRow, mapAccount, mapMarket, splitSymbol, toHoldings, holdingIdentity, holdingKey, planSync,
   };
   root.Importer = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

@@ -17,6 +17,7 @@ class YahooSymbols(unittest.TestCase):
         self.assertEqual(up.yahoo_symbol("TSXV", "abc"), "ABC.V")
         self.assertEqual(up.yahoo_symbol("NEO", "ABC"), "ABC.NE")
         self.assertEqual(up.yahoo_symbol("US", "BRK.B"), "BRK-B")
+        self.assertEqual(up.yahoo_symbol("CRYPTO", "btc"), "BTC-USD")
 
 
 class LastCloses(unittest.TestCase):

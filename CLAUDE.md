@@ -30,6 +30,7 @@ Household finance dashboard for a couple in Québec. Static site (GitHub Pages) 
 node --check app.js calc.js importer.js tax.js projection.js
 node tests/parity_test.mjs
 node tests/import_test.mjs
+node tests/import_symbols_test.mjs
 node tests/pdf_import_test.mjs
 node tests/gross_income_test.mjs
 node tests/plan_test.mjs
