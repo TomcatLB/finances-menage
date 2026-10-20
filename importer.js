@@ -548,29 +548,29 @@
       if (opts.kind === 'public') {
         if (CASH_WORDS.test(plain(sym)) || (!sym && CASH_WORDS.test(plain(name)))) {
           const amount = value ?? qtyIn;
-          if (amount === null) return push({ ok: false, line, label: label || 'Encaisse', reason: 'Montant manquant' });
+          if (amount === null) return push({ ok: false, line, label: label || 'Cash', reason: 'Missing amount' });
           if (!currency && /usd/.test(plain(sym || name))) currency = 'USD';
           const cur = currency || 'CAD';
-          return push({ ok: true, line, label: 'Encaisse ' + cur, row: { ...base, market: 'CASH', symbol: cur, currency: cur, name: 'Encaisse', qty: r4(Math.max(0, amount)), avg_cost: null } });
+          return push({ ok: true, line, label: 'Cash ' + cur, row: { ...base, market: 'CASH', symbol: cur, currency: cur, name: 'Encaisse', qty: r4(Math.max(0, amount)), avg_cost: null } });
         }
-        if (!sym) return push({ ok: false, line, label: label || `Ligne ${line}`, reason: 'Symbole manquant' });
+        if (!sym) return push({ ok: false, line, label: label || `Row ${line}`, reason: 'Missing symbol' });
         const sp = splitSymbol(sym);
         let market = mapMarket(cell(r, 'market')) || sp.market;
-        if (market === 'CSE') return push({ ok: false, line, label: sp.symbol, reason: 'Bourse des valeurs canadiennes (CSE) : ajoute-le comme placement privé' });
+        if (market === 'CSE') return push({ ok: false, line, label: sp.symbol, reason: 'Canadian Securities Exchange (CSE): add it as a private investment' });
         if (!market) market = currency === 'USD' ? 'US' : opts.market || 'TSX';
         let qty = qtyIn;
         if (qty === null && value !== null && price) qty = value / price;
-        if (qty === null || !(qty > 0)) return push({ ok: false, line, label: sp.symbol, reason: 'Quantité manquante ou nulle' });
+        if (qty === null || !(qty > 0)) return push({ ok: false, line, label: sp.symbol, reason: 'Missing or zero quantity' });
         const avgCost = avg !== null ? avg : book !== null ? book / qty : null;
         return push({ ok: true, line, label: sp.symbol, row: { ...base, market, symbol: sp.symbol, currency: market === 'US' ? 'USD' : 'CAD', name: name && name !== sym ? name : null, qty: r4(qty), avg_cost: avgCost === null ? null : r4(Math.abs(avgCost)) } });
       }
       // Private: valued by hand. A single value is stored as 1 unit at that price.
-      if (!label) return push({ ok: false, line, label: `Ligne ${line}`, reason: 'Nom manquant' });
+      if (!label) return push({ ok: false, line, label: `Row ${line}`, reason: 'Missing name' });
       let qty = qtyIn, px = price;
       if (value !== null && (qty === null || qty <= 0) && px === null) { qty = 1; px = value; }
       else if (value !== null && qty > 0 && px === null) px = value / qty;
       else if (px !== null && (qty === null || qty <= 0)) { qty = value !== null && px ? value / px : 1; }
-      if (px === null || qty === null || !(qty > 0)) return push({ ok: false, line, label, reason: 'Valeur manquante' });
+      if (px === null || qty === null || !(qty > 0)) return push({ ok: false, line, label, reason: 'Missing value' });
       const avgCost = avg !== null ? avg : book !== null ? book / qty : null;
       const rawDate = cell(r, 'date');
       const date = excelDate(rawDate) || parseDate(rawDate) || opts.date || null;

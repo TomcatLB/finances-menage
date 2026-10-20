@@ -212,15 +212,15 @@
     };
     // Everything as dividends: pay the corporate tax, distribute the rest.
     const z = yr({ salary: 0, dividends: 0 });
-    make('Tout en dividendes', 0, max0(z.available - z.corpTax.total));
+    make('All dividends', 0, max0(z.available - z.corpTax.total));
     // Everything as salary: the largest salary the cash allows.
     let lo = 0, hi = max0(z.available);
     for (let i = 0; i < 60; i++) {
       const mid = (lo + hi) / 2;
       if (yr({ salary: mid, dividends: 0 }).retained >= 0) lo = mid; else hi = mid;
     }
-    make('Tout en salaire', lo, 0);
-    make('Ce que tu as entré', current.salary || 0, current.dividends || 0);
+    make('All salary', lo, 0);
+    make('What you entered', current.salary || 0, current.dividends || 0);
     return out;
   }
 

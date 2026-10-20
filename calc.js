@@ -9,11 +9,11 @@
   const AUTO_MARKETS = ['TSX', 'TSXV', 'NEO', 'US'];
 
   const FREQS = {
-    monthly: { label: 'Mensuel', n: 12 },
-    semimonthly: { label: '2 fois par mois', n: 24 },
-    biweekly: { label: 'Aux 2 semaines', n: 26 },
-    weekly: { label: 'Hebdomadaire', n: 52 },
-    yearly: { label: 'Annuel', n: 1 },
+    monthly: { label: 'Monthly', n: 12 },
+    semimonthly: { label: 'Twice a month', n: 24 },
+    biweekly: { label: 'Every 2 weeks', n: 26 },
+    weekly: { label: 'Weekly', n: 52 },
+    yearly: { label: 'Yearly', n: 1 },
   };
 
   function num(v) {
