@@ -2022,6 +2022,18 @@
 
     async function readFiles(fileList) {
       for (const file of fileList) {
+        if (/\.pdf$/i.test(file.name) || file.type === 'application/pdf') {
+          st.files = st.files.filter((f) => f.name !== file.name);
+          try {
+            const pdf = await I.readPdfStatement(await file.arrayBuffer());
+            st.files.push({ name: file.name, rows: pdf.rows, cols: { date: 0, desc: [1], amount: 2, debit: -1, credit: -1 }, pdf: true,
+              note: pdf.count ? null : pdf.hasText ? 'aucune transaction reconnue dans ce PDF. Essaie le CSV de ce compte.' : 'ce PDF ne contient pas de texte (document numérisé?). Essaie le CSV de ce compte.' });
+          } catch (e) {
+            st.files.push({ name: file.name, rows: [], cols: { date: 0, desc: [1], amount: 2, debit: -1, credit: -1 }, pdf: true,
+              note: e.message === 'pdf-encrypted' ? 'ce PDF est protégé par un mot de passe. Essaie le CSV de ce compte.' : 'ce fichier ne se lit pas comme un PDF.' });
+          }
+          continue;
+        }
         const text = await readText(file);
         const rows = I.parseCSV(text);
         if (rows.length < 2) { st.files.push({ name: file.name, rows, cols: { date: -1, desc: [], amount: -1, debit: -1, credit: -1 } }); continue; }
@@ -2046,13 +2058,13 @@
     }
 
     function draw() {
-      const fileInput = h('input', { type: 'file', id: 'import-files', accept: '.csv,text/csv', multiple: true,
+      const fileInput = h('input', { type: 'file', id: 'import-files', accept: '.csv,text/csv,.pdf,application/pdf', multiple: true,
         onchange: (e) => readFiles(e.target.files) });
       const top = [
         h('h2', { text: 'Importer des relevés' }),
-        h('p', { class: 'footnote', text: 'Dans RBC Banque en direct : ouvre le compte (ou la carte), choisis la période, puis Télécharger / Exporter au format CSV. Importe 2 à 3 mois, un fichier par compte. Le fichier est lu dans ton navigateur : il n’est pas envoyé ni conservé, seules les lignes que tu ajoutes au budget sont enregistrées.' }),
+        h('p', { class: 'footnote', text: 'Dans RBC Banque en direct : ouvre le compte (ou la carte), choisis la période, puis Télécharger / Exporter au format CSV. Les relevés PDF fonctionnent aussi (un fichier par mois). Importe 2 à 3 mois pour chaque compte. Le fichier est lu dans ton navigateur : il n’est pas envoyé ni conservé, seules les lignes que tu ajoutes au budget sont enregistrées.' }),
         h('div', { class: 'fields' },
-          h('div', { class: 'field' }, h('label', { for: 'import-files', text: 'Fichiers CSV' }), fileInput),
+          h('div', { class: 'field' }, h('label', { for: 'import-files', text: 'Fichiers CSV ou PDF' }), fileInput),
           h('div', { class: 'field' }, h('label', { for: 'import-owner', text: 'À qui sont ces comptes?' }),
             h('select', { id: 'import-owner', onchange: (e) => { st.owner = e.target.value; } },
               Object.entries(ownerOptions()).map(([k, l]) => h('option', { value: k, selected: k === st.owner ? true : null, text: l }))))),
@@ -2060,9 +2072,10 @@
       const body = [];
       if (st.files.length) {
         body.push(h('p', { class: 'footnote', text: 'Fichiers : ' + st.files.map((f) => f.name).join(', ') }));
+        for (const f of st.files) if (f.note) body.push(h('div', { class: 'banner', text: `« ${f.name} » : ${f.note}` }));
         for (const f of st.problems || []) body.push(f.rows.length > 1 ? columnPicker(f) : h('div', { class: 'banner', text: `« ${f.name} » est vide ou n’est pas un CSV lisible.` }));
         for (const f of st.files) {
-          if (f.cols.amount < 0) continue;
+          if (f.cols.amount < 0 || f.pdf) continue;
           body.push(h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: st.flip[f.name] ? true : null,
             onchange: (e) => { st.flip[f.name] = e.target.checked; analyzeAll(); draw(); } }),
           `Dans « ${f.name} », les achats sont des montants positifs (cartes de crédit)`));

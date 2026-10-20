@@ -7,7 +7,7 @@ Household finance dashboard for a couple in Québec. Static site (GitHub Pages) 
 - `calc.js` — pure formulas (valuation, net worth, debts/mortgage, REEE grant room, project projections). Shared by the page and the tests.
 - `tax.js` — Québec + federal estimates: personal tax, QPP/QPIP/FSS, corporate tax, a company's year, salary-vs-dividends scenarios. All rates live in `PARAMS`; sources in `docs/taux-2026.md`.
 - `projection.js` — yearly net-worth projection with retirement (RRQ, PSV) and a seeded Monte Carlo spread.
-- `importer.js` — bank CSV parsing (RBC first) and recurring-expense detection; portfolio import (small built-in .xlsx reader, Google Sheets CSV links, column detection, sync with saved holdings); `.xlsx` writer for the Excel export. No third-party spreadsheet library.
+- `importer.js` — bank CSV and PDF statement parsing (RBC first; small built-in PDF text reader) and recurring-expense detection; portfolio import (small built-in .xlsx reader, Google Sheets CSV links, column detection, sync with saved holdings); `.xlsx` writer for the Excel export. No third-party spreadsheet library.
 - `supabase/schema.sql` — idempotent: tables, `alter … add column if not exists` for upgrades, RLS limited to `allowed_users`.
 - `scripts/update_prices.py` — daily job: Yahoo closes via yfinance, USD/CAD from Bank of Canada Valet, then a net-worth snapshot. `scripts/reminders.py` runs after it and keeps one GitHub issue labelled `rappels` (GitHub emails the owner).
 - `dev.html` + `dev/fake-supabase.js` — **test mode**: the real page with made-up data kept in the browser tab; it never loads `config.js`. Use it to try every change.
@@ -30,6 +30,8 @@ Household finance dashboard for a couple in Québec. Static site (GitHub Pages) 
 node --check app.js calc.js importer.js tax.js projection.js
 node tests/parity_test.mjs
 node tests/import_test.mjs
+node tests/pdf_import_test.mjs
+node tests/gross_income_test.mjs
 node tests/plan_test.mjs
 python3 -m unittest discover tests      # needs `pip install requests`
 python3 -m http.server 8000             # then open http://localhost:8000/dev.html (test mode)
