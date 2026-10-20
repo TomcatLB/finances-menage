@@ -45,14 +45,14 @@ assert.equal(bySym['QETH.U'].row.currency, 'USD');
 // Fund and note codes have no closing price: skipped here, with a pointer to private holdings.
 for (const s of ['IXF903', 'OVB5ACC1']) {
   assert.equal(bySym[s].ok, false);
-  assert.match(bySym[s].reason, /Placements privés/);
+  assert.match(bySym[s].reason, /Private investments/);
 }
 
 // The same sheet in the private import: listed titles already saved as public are skipped, the funds come in at market value.
 const priv = I.toHoldings(rows, 0, I.detectHoldingColumns(rows[0]), { kind: 'private', owner: 'p1', account: 'CELI', publicSymbols: new Set(['AMZN', 'VFV', 'QETH.U']) });
 assert.deepEqual(priv.filter((c) => c.ok).map((c) => c.row.symbol), ['IXF903', 'OVB5ACC1']);
 assert.equal(priv.find((c) => c.label === 'IXF903').row.qty * priv.find((c) => c.label === 'IXF903').row.manual_price, 1200);
-assert.ok(priv.filter((c) => !c.ok).every((c) => c.reason === 'Déjà dans Placements publics'));
+assert.ok(priv.filter((c) => !c.ok).every((c) => c.reason === 'Already in Public investments'));
 
 console.log('Import symbol formats OK');
 
@@ -74,8 +74,8 @@ console.log('Import symbol formats OK');
   assert.deepEqual(ok, ['XEQT:TSX:CAD', 'AAPL:US:USD', 'QETH.U:TSX:USD', 'BTC:CRYPTO:USD']);
   assert.equal(pub.find((c) => c.label === 'BTC').row.avg_cost, 50000);
   const reasons = Object.fromEntries(pub.filter((c) => !c.ok).map((c) => [c.label, c.reason]));
-  assert.match(reasons.CASH, /Dettes/);
-  assert.match(reasons.FUNDA1, /Placements privés/);
+  assert.match(reasons.CASH, /Debts/);
+  assert.match(reasons.FUNDA1, /Private investments/);
   assert.equal(Object.keys(reasons).length, 5); // cash, 2 funds, partnership (no units), note (no symbol); nothing under the total
 
   const priv = I.toHoldings(sheet.rows, header, cols, { kind: 'private', owner: 'p1', account: 'Non enregistré', date: '2026-10-15',

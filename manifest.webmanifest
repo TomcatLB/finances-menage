@@ -1,7 +1,7 @@
 {
-  "name": "Finances du ménage",
+  "name": "Household finances",
   "short_name": "Finances",
-  "lang": "fr-CA",
+  "lang": "en-CA",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

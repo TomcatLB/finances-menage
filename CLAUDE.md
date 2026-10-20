@@ -1,4 +1,4 @@
-# Finances du ménage
+# Household finances (Finances du ménage)
 
 Household finance dashboard for a couple in Québec. Static site (GitHub Pages) + Supabase (Postgres, auth, row-level security) + a weekday GitHub Action for closing prices and reminders.
 
@@ -19,7 +19,9 @@ Household finance dashboard for a couple in Québec. Static site (GitHub Pages) 
 - A new column the page writes must not break an older database: only send it when it has a value, or when the loaded row already has the key (see `update_freq`, `asset_class` in `openHolding`).
 - `index.html` and `dev.html` load the same scripts in the same order; change both.
 - Every January: update `PARAMS` in `tax.js`, `tfsaLimit`/`rrspLimit`, PSV in `projection.js` DEFAULTS, and `docs/taux-2026.md` (rename for the year). Run `node tests/plan_test.mjs`.
-- UI text is French (Québec). Money is CAD, formatted with `Intl` `fr-CA`.
+- UI text is English (Canada). Money is CAD, formatted with `Intl` `en-CA`. Number inputs accept `1,234.56` and the French `4,59` (`parseNum`).
+- Saved values stay in French: account names (`CELI`, `Non enregistré`…), budget and company categories, asset types. They are what the database, older rows and the importers use. Show them through `L()` / `LABELS` in `app.js`; a new saved value needs an English entry there. Don't rename them in the data.
+- Importers must keep reading French and English input (RBC French statements, French column titles).
 - Owners are `p1`, `p2`, `joint`; joint items count 50/50 in a person's view (`Calc.share`).
 - Never put the Supabase secret key in the front end; `config.js` holds only the publishable key. Never commit real financial data.
 - Fixed-rate mortgages compound semi-annually (Interest Act); other debts monthly.

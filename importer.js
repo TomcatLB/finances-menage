@@ -596,30 +596,30 @@
       if (opts.kind === 'public') {
         if (CASH_WORDS.test(plain(sym)) || (!sym && CASH_WORDS.test(plain(name)))) {
           const amount = value ?? qtyIn;
-          if (amount === null) return push({ ok: false, line, label: label || 'Encaisse', reason: 'Montant manquant' });
-          if (amount < 0) return push({ ok: false, line, label: label || 'Encaisse', reason: 'Solde négatif (marge) : ajoute-le dans Dettes' });
+          if (amount === null) return push({ ok: false, line, label: label || 'Cash', reason: 'Missing amount' });
+          if (amount < 0) return push({ ok: false, line, label: label || 'Cash', reason: 'Negative balance (margin): add it under Debts' });
           if (!currency && /usd/.test(plain(sym || name))) currency = 'USD';
           const cur = currency || 'CAD';
-          return push({ ok: true, line, label: 'Encaisse ' + cur, row: { ...base, market: 'CASH', symbol: cur, currency: cur, name: 'Encaisse', qty: r4(Math.max(0, amount)), avg_cost: null } });
+          return push({ ok: true, line, label: 'Cash ' + cur, row: { ...base, market: 'CASH', symbol: cur, currency: cur, name: 'Encaisse', qty: r4(Math.max(0, amount)), avg_cost: null } });
         }
-        if (!sym) return push({ ok: false, line, label: label || `Ligne ${line}`, reason: 'Symbole manquant' });
+        if (!sym) return push({ ok: false, line, label: label || `Row ${line}`, reason: 'Missing symbol' });
         const sp = splitSymbol(sym);
-        if (notListed(sp.symbol)) return push({ ok: false, line, label: sp.symbol, reason: 'Fonds ou billet non coté en bourse : importe-le dans Placements privés (avec sa valeur marchande)' });
+        if (notListed(sp.symbol)) return push({ ok: false, line, label: sp.symbol, reason: 'Fund or note not listed on an exchange: import it under Private investments (with its market value)' });
         let market = sp.market || mapMarket(cell(r, 'market'));
-        if (market === 'CSE') return push({ ok: false, line, label: sp.symbol, reason: 'Bourse des valeurs canadiennes (CSE) : ajoute-le comme placement privé' });
+        if (market === 'CSE') return push({ ok: false, line, label: sp.symbol, reason: 'Canadian Securities Exchange (CSE): add it as a private investment' });
         if (!market) market = currency === 'USD' ? 'US' : opts.market || 'TSX';
         let qty = qtyIn;
         if (qty === null && value !== null && price) qty = value / price;
-        if (qty === null || !(qty > 0)) return push({ ok: false, line, label: sp.symbol, reason: 'Quantité manquante ou nulle' });
+        if (qty === null || !(qty > 0)) return push({ ok: false, line, label: sp.symbol, reason: 'Missing or zero quantity' });
         const avgCost = avg !== null ? avg : book !== null ? book / qty : null;
         return push({ ok: true, line, label: sp.symbol, row: { ...base, market, symbol: sp.symbol, currency: market === 'US' || market === 'CRYPTO' || /\.U$/.test(sp.symbol) ? 'USD' : 'CAD', name: name && name !== sym ? name : null, qty: r4(qty), avg_cost: avgCost === null ? null : r4(Math.abs(avgCost)) } });
       }
       // Private: valued by hand. A single value is stored as 1 unit at that price.
-      if (!label) return push({ ok: false, line, label: `Ligne ${line}`, reason: 'Nom manquant' });
+      if (!label) return push({ ok: false, line, label: `Row ${line}`, reason: 'Missing name' });
       // One sheet can hold both kinds: titles already saved as public holdings are left to the public import.
-      if (sym && qtyIn !== null && opts.publicSymbols && opts.publicSymbols.has(splitSymbol(sym).symbol)) return push({ ok: false, line, label, reason: 'Déjà dans Placements publics' });
-      if (CASH_WORDS.test(plain(sym || name))) return push({ ok: false, line, label, reason: 'Encaisse : importe-la avec les placements publics' });
-      if (value !== null && value < 0) return push({ ok: false, line, label, reason: 'Valeur négative : ajoute-la dans Dettes' });
+      if (sym && qtyIn !== null && opts.publicSymbols && opts.publicSymbols.has(splitSymbol(sym).symbol)) return push({ ok: false, line, label, reason: 'Already in Public investments' });
+      if (CASH_WORDS.test(plain(sym || name))) return push({ ok: false, line, label, reason: 'Cash: import it with the public investments' });
+      if (value !== null && value < 0) return push({ ok: false, line, label, reason: 'Negative value: add it under Debts' });
       let qty = qtyIn, px = price, rate = 1;
       if (value !== null && qty > 0 && px > 0) {
         // Value = units × price × rate: about 1.4 means a USD price whose value was converted to CAD in the sheet.
@@ -630,7 +630,7 @@
       } else if (value !== null && qty > 0 && px === null) px = value / qty;
       else if (value !== null && (qty === null || qty <= 0) && px === null) { qty = 1; px = value; }
       else if (px !== null && (qty === null || qty <= 0)) { qty = value !== null && px ? value / px : 1; }
-      if (px === null || qty === null || !(qty > 0)) return push({ ok: false, line, label, reason: 'Valeur manquante' });
+      if (px === null || qty === null || !(qty > 0)) return push({ ok: false, line, label, reason: 'Missing value' });
       const avgCost = avg !== null ? avg : book !== null ? book / qty / rate : null;
       const rawDate = cell(r, 'date');
       const date = excelDate(rawDate) || parseDate(rawDate) || opts.date || null;
