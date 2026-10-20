@@ -484,7 +484,11 @@
     return null;
   }
 
-  /** Splits "XEQT.TO", "TSX:XEQT", "BAM-A.TO" into the app's symbol and market. */
+  /**
+   * Splits "XEQT.TO", "TSX:XEQT", "BAM-A.TO" into the app's symbol and market.
+   * Some brokers use Reuters suffixes for US listings: AMZN.O (Nasdaq), ARKK.K (NYSE Arca), BRK.B.N (NYSE).
+   * US-dollar units on the TSX may come as QETH_U or QETH-U: kept as QETH.U.
+   */
   function splitSymbol(raw) {
     let s = String(raw || '').trim().toUpperCase().replace(/\s+/g, '');
     let market = null;
@@ -495,10 +499,16 @@
       s = m[1];
       market = { TO: 'TSX', TSX: 'TSX', V: 'TSXV', VN: 'TSXV', NE: 'NEO', NEO: 'NEO', US: 'US', CN: 'CSE' }[m[2]];
     }
+    m = s.match(/^([A-Z][A-Z0-9.-]*)\.(O|OQ|K|N)$/);
+    if (m && !m[1].endsWith('.')) { s = m[1]; market = 'US'; }
     m = s.match(/^(.+)-(T|CT)$/); // some banks write XEQT-T for Toronto
     if (m && !market) { s = m[1]; market = 'TSX'; }
+    s = s.replace(/_/g, '.');
     return { symbol: s.replace(/-/g, '.'), market };
   }
+
+  /** Mutual fund and note codes (TDB902, IXF903, OVB5ACC1) are not listed on an exchange: no closing price. */
+  const notListed = (symbol) => /\d/.test(symbol);
 
   const CASH_WORDS = /^(cash|encaisse|especes|liquidites|liquidite|argentcomptant|soldecomptant|soldedetresorerie|cad|usd|cad\$|usd\$|cashcad|cashusd|comptant)$/;
   const TOTAL_ROW = /^(total|soustotal|grandtotal|totaux|sommaire|summary)/;
@@ -512,7 +522,7 @@
 
   /**
    * rows: the sheet; header: index of the header row; cols: from detectHoldingColumns.
-   * opts: { kind: 'public' | 'private', owner, account, market, date, ownerNames: { p1, p2 } }
+   * opts: { kind: 'public' | 'private', owner, account, market, date, ownerNames: { p1, p2 }, publicSymbols: Set (private import) }
    * Returns one candidate per data row: { ok, reason, row: {…holding fields} , line }.
    */
   function toHoldings(rows, header, cols, opts) {
@@ -555,17 +565,20 @@
         }
         if (!sym) return push({ ok: false, line, label: label || `Ligne ${line}`, reason: 'Symbole manquant' });
         const sp = splitSymbol(sym);
-        let market = mapMarket(cell(r, 'market')) || sp.market;
+        if (notListed(sp.symbol)) return push({ ok: false, line, label: sp.symbol, reason: 'Fonds ou billet non coté en bourse : importe-le dans Placements privés (avec sa valeur marchande)' });
+        let market = sp.market || mapMarket(cell(r, 'market'));
         if (market === 'CSE') return push({ ok: false, line, label: sp.symbol, reason: 'Bourse des valeurs canadiennes (CSE) : ajoute-le comme placement privé' });
         if (!market) market = currency === 'USD' ? 'US' : opts.market || 'TSX';
         let qty = qtyIn;
         if (qty === null && value !== null && price) qty = value / price;
         if (qty === null || !(qty > 0)) return push({ ok: false, line, label: sp.symbol, reason: 'Quantité manquante ou nulle' });
         const avgCost = avg !== null ? avg : book !== null ? book / qty : null;
-        return push({ ok: true, line, label: sp.symbol, row: { ...base, market, symbol: sp.symbol, currency: market === 'US' ? 'USD' : 'CAD', name: name && name !== sym ? name : null, qty: r4(qty), avg_cost: avgCost === null ? null : r4(Math.abs(avgCost)) } });
+        return push({ ok: true, line, label: sp.symbol, row: { ...base, market, symbol: sp.symbol, currency: market === 'US' || /\.U$/.test(sp.symbol) ? 'USD' : 'CAD', name: name && name !== sym ? name : null, qty: r4(qty), avg_cost: avgCost === null ? null : r4(Math.abs(avgCost)) } });
       }
       // Private: valued by hand. A single value is stored as 1 unit at that price.
       if (!label) return push({ ok: false, line, label: `Ligne ${line}`, reason: 'Nom manquant' });
+      // One sheet can hold both kinds: titles already saved as public holdings are left to the public import.
+      if (sym && opts.publicSymbols && opts.publicSymbols.has(splitSymbol(sym).symbol)) return push({ ok: false, line, label, reason: 'Déjà dans Placements publics' });
       let qty = qtyIn, px = price;
       if (value !== null && (qty === null || qty <= 0) && px === null) { qty = 1; px = value; }
       else if (value !== null && qty > 0 && px === null) px = value / qty;

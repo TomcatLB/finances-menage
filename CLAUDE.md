@@ -30,6 +30,7 @@ Household finance dashboard for a couple in Québec. Static site (GitHub Pages) 
 node --check app.js calc.js importer.js tax.js projection.js
 node tests/parity_test.mjs
 node tests/import_test.mjs
+node tests/import_symbols_test.mjs
 node tests/plan_test.mjs
 python3 -m unittest discover tests      # needs `pip install requests`
 python3 -m http.server 8000             # then open http://localhost:8000/dev.html (test mode)

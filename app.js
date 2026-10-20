@@ -2163,6 +2163,7 @@
       st.candidates = I.toHoldings(rows(), st.header, st.cols, {
         kind, owner: st.owner, account: st.account, market: st.market, date: st.date,
         ownerNames: { p1: S.settings.p1_name, p2: S.settings.p2_name },
+        publicSymbols: priv ? new Set(S.holdings.filter((hd) => !isPrivate(hd) && hd.market !== 'CASH').map((hd) => String(hd.symbol).toUpperCase())) : null,
       });
       st.plan = I.planSync(st.candidates, S.holdings.filter((hd) => isPrivate(hd) === priv));
       st.picks = new Map(st.plan.items.map((it) => [it.key, it.status !== 'same']));
