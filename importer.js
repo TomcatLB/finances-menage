@@ -300,6 +300,17 @@
     return sheets;
   }
 
+  /** The day an .xlsx was last saved (docProps/core.xml), in local time: YYYY-MM-DD, or null. */
+  async function xlsxSavedDate(buffer) {
+    const zip = unzip(buffer);
+    if (!zip['docProps/core.xml']) return null;
+    const m = (await zip['docProps/core.xml']()).match(/<dcterms:modified[^>]*>([^<]+)</);
+    const t = m ? new Date(m[1].trim()) : null;
+    if (!t || !Number.isFinite(t.getTime())) return null;
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`;
+  }
+
   function parseSheetXml(xml, strings) {
     const rows = [];
     let nextRow = 0;
@@ -457,6 +468,24 @@
     return best;
   }
 
+  /** A date written above the table ("As of 2026-10-20", "En date du : 20/10/2026"). YYYY-MM-DD or null. */
+  function asOfDate(rows, header) {
+    const label = /^(asof|asat|endate(du)?|datedu|dateduportefeuille|dateduleve|valeurau|valeursau|date|au)$/;
+    for (const r of rows.slice(0, Math.min(header, 20))) {
+      const cells = (r || []).map((c) => String(c ?? '').trim());
+      for (let i = 0; i < cells.length; i++) {
+        const m = cells[i].match(/^(.*?)[\s:]*(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})$/);
+        const [text, inCell] = m ? [m[1], m[2]] : [cells[i], null];
+        if (!label.test(plain(text))) continue;
+        const raw = inCell || cells.slice(i + 1).find(Boolean);
+        if (!raw) continue;
+        const d = excelDate(raw) || dateParserFor([raw])(raw);
+        if (d) return d;
+      }
+    }
+    return null;
+  }
+
   const ACCOUNT_RULES = [
     [/celiapp|fhsa|premiereproprie/, 'CELIAPP'],
     [/celi|tfsa/, 'CELI'],
@@ -511,6 +540,8 @@
   const notListed = (symbol) => /\d/.test(symbol);
 
   const CASH_WORDS = /^(cash|encaisse|especes|liquidites|liquidite|argentcomptant|soldecomptant|soldedetresorerie|cad|usd|cad\$|usd\$|cashcad|cashusd|comptant)$/;
+  const USD_CAD_RANGE = [1.15, 1.75];
+  const CRYPTO = /^(BTC|XBT|ETH|SOL|ADA|XRP|DOGE|LTC|DOT|AVAX|LINK|MATIC|USDC|USDT)$/;
   const TOTAL_ROW = /^(total|soustotal|grandtotal|totaux|sommaire|summary)/;
   const r4 = (x) => Math.round(x * 10000) / 10000;
 
@@ -544,8 +575,10 @@
       const line = header + i + 2;
       const sym = cell(r, 'symbol'), name = cell(r, 'name');
       if (!r.some((c) => String(c ?? '').trim())) return;
+      if (/^-?[\d\s.,]+$/.test(sym)) return; // summary rows under the table (a number where the symbol goes)
       if (TOTAL_ROW.test(plain(sym || name)) || (!sym && !name && TOTAL_ROW.test(plain(r.find((c) => String(c).trim()) || '')))) return;
       const qtyIn = amt(r, 'qty'), avg = amt(r, 'avg_cost'), book = amt(r, 'book_value'), price = amt(r, 'price'), value = amt(r, 'value');
+      if (!sym && [qtyIn, avg, book, price, value].every((x) => x === null)) return; // a note or a heading, not a holding
       const curRaw = plain(cell(r, 'currency'));
       let currency = /usd|^us\$?$|americain/.test(curRaw) ? 'USD' : /cad|^can|canadien/.test(curRaw) ? 'CAD' : null;
       const fileAccount = mapAccount(cell(r, 'account')), fileOwner = mapOwner(cell(r, 'owner'));
@@ -559,12 +592,14 @@
         if (CASH_WORDS.test(plain(sym)) || (!sym && CASH_WORDS.test(plain(name)))) {
           const amount = value ?? qtyIn;
           if (amount === null) return push({ ok: false, line, label: label || 'Encaisse', reason: 'Montant manquant' });
+          if (amount < 0) return push({ ok: false, line, label: label || 'Encaisse', reason: 'Solde négatif (marge) : ajoute-le dans Dettes' });
           if (!currency && /usd/.test(plain(sym || name))) currency = 'USD';
           const cur = currency || 'CAD';
           return push({ ok: true, line, label: 'Encaisse ' + cur, row: { ...base, market: 'CASH', symbol: cur, currency: cur, name: 'Encaisse', qty: r4(Math.max(0, amount)), avg_cost: null } });
         }
         if (!sym) return push({ ok: false, line, label: label || `Ligne ${line}`, reason: 'Symbole manquant' });
         const sp = splitSymbol(sym);
+        if (CRYPTO.test(sp.symbol) && !sp.market) return push({ ok: false, line, label: sp.symbol, reason: 'Cryptomonnaie : importe-la dans Placements privés (avec sa valeur marchande)' });
         if (notListed(sp.symbol)) return push({ ok: false, line, label: sp.symbol, reason: 'Fonds ou billet non coté en bourse : importe-le dans Placements privés (avec sa valeur marchande)' });
         let market = sp.market || mapMarket(cell(r, 'market'));
         if (market === 'CSE') return push({ ok: false, line, label: sp.symbol, reason: 'Bourse des valeurs canadiennes (CSE) : ajoute-le comme placement privé' });
@@ -578,13 +613,21 @@
       // Private: valued by hand. A single value is stored as 1 unit at that price.
       if (!label) return push({ ok: false, line, label: `Ligne ${line}`, reason: 'Nom manquant' });
       // One sheet can hold both kinds: titles already saved as public holdings are left to the public import.
-      if (sym && opts.publicSymbols && opts.publicSymbols.has(splitSymbol(sym).symbol)) return push({ ok: false, line, label, reason: 'Déjà dans Placements publics' });
-      let qty = qtyIn, px = price;
-      if (value !== null && (qty === null || qty <= 0) && px === null) { qty = 1; px = value; }
-      else if (value !== null && qty > 0 && px === null) px = value / qty;
+      if (sym && qtyIn !== null && opts.publicSymbols && opts.publicSymbols.has(splitSymbol(sym).symbol)) return push({ ok: false, line, label, reason: 'Déjà dans Placements publics' });
+      if (CASH_WORDS.test(plain(sym || name))) return push({ ok: false, line, label, reason: 'Encaisse : importe-la avec les placements publics' });
+      if (value !== null && value < 0) return push({ ok: false, line, label, reason: 'Valeur négative : ajoute-la dans Dettes' });
+      let qty = qtyIn, px = price, rate = 1;
+      if (value !== null && qty > 0 && px > 0) {
+        // Value = units × price × rate: about 1.4 means a USD price whose value was converted to CAD in the sheet.
+        // Keep the USD price so the app applies each day's USD/CAD rate. Any other gap: trust the value.
+        const k = value / (qty * px);
+        if (currency !== 'CAD' && k > USD_CAD_RANGE[0] && k < USD_CAD_RANGE[1]) { currency = 'USD'; rate = k; }
+        else if (Math.abs(k - 1) > 0.01) px = value / qty;
+      } else if (value !== null && qty > 0 && px === null) px = value / qty;
+      else if (value !== null && (qty === null || qty <= 0) && px === null) { qty = 1; px = value; }
       else if (px !== null && (qty === null || qty <= 0)) { qty = value !== null && px ? value / px : 1; }
       if (px === null || qty === null || !(qty > 0)) return push({ ok: false, line, label, reason: 'Valeur manquante' });
-      const avgCost = avg !== null ? avg : book !== null ? book / qty : null;
+      const avgCost = avg !== null ? avg : book !== null ? book / qty / rate : null;
       const rawDate = cell(r, 'date');
       const date = excelDate(rawDate) || parseDate(rawDate) || opts.date || null;
       return push({ ok: true, line, label, row: { ...base, market: 'MANUAL', symbol: (sym || name).toUpperCase().slice(0, 40), currency: currency || 'CAD', name: name || null, qty: r4(qty), avg_cost: avgCost === null ? null : r4(Math.abs(avgCost)), manual_price: r4(px), manual_price_date: date } });
@@ -1269,7 +1312,7 @@
 
   const api = {
     parseCSV, detectColumns, parseAmount, dateParserFor, toTransactions, guessExpensesPositive, merchantKey, suggestCategory, analyze,
-    readPdfText, statementTransactions, readPdfStatement, unzip, readXlsx, parseSheetXml, writeXlsx, sheetsCsvUrl, detectHoldingColumns, findHeaderRow, mapAccount, mapMarket, splitSymbol, toHoldings, holdingIdentity, holdingKey, planSync,
+    readPdfText, statementTransactions, readPdfStatement, unzip, readXlsx, xlsxSavedDate, asOfDate, parseSheetXml, writeXlsx, sheetsCsvUrl, detectHoldingColumns, findHeaderRow, mapAccount, mapMarket, splitSymbol, toHoldings, holdingIdentity, holdingKey, planSync,
   };
   root.Importer = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

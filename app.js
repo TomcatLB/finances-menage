@@ -2192,7 +2192,7 @@
       source: '', sheets: [], sheetIdx: 0, header: 0, cols: null, error: '', loading: false,
       link: S.settings[linkKey] || '', fromLink: false,
       owner: S.who === 'all' ? (priv ? 'joint' : 'p1') : S.who,
-      account: priv ? 'Non enregistré' : 'CELI', market: 'TSX', date: todayISO(), freq: 'quarterly',
+      account: priv ? 'Non enregistré' : 'CELI', market: 'TSX', date: todayISO(), dateSrc: '', savedDate: null, freq: 'quarterly',
       candidates: [], plan: null, picks: new Map(), remove: new Set(),
     };
     const close = () => { sheet.hidden = true; sheet.replaceChildren(); document.removeEventListener('keydown', onKey); };
@@ -2203,6 +2203,9 @@
       st.sheetIdx = i;
       st.header = I.findHeaderRow(rows());
       st.cols = I.detectHoldingColumns(rows()[st.header] || []);
+      // Value date: an "As of" cell above the table, else the day the .xlsx was saved, else today.
+      const asOf = I.asOfDate(rows(), st.header);
+      [st.date, st.dateSrc] = asOf ? [asOf, 'asof'] : st.savedDate ? [st.savedDate, 'saved'] : [todayISO(), ''];
       analyze();
     }
     function analyze() {
@@ -2221,7 +2224,12 @@
       st.error = '';
       try {
         const name = file.name.toLowerCase();
-        if (/\.xlsx$|\.xlsm$/.test(name)) st.sheets = await I.readXlsx(await readBuffer(file));
+        st.savedDate = null;
+        if (/\.xlsx$|\.xlsm$/.test(name)) {
+          const buf = await readBuffer(file);
+          st.sheets = await I.readXlsx(buf);
+          st.savedDate = await I.xlsxSavedDate(buf).catch(() => null);
+        }
         else if (/\.(xls|ods|numbers)$/.test(name)) throw new Error('Ce format ne se lit pas directement. Dans Excel ou Numbers : Fichier → Enregistrer sous (ou Exporter) → Classeur Excel (.xlsx) ou CSV, puis importe ce fichier.');
         else st.sheets = [{ name: file.name, rows: I.parseCSV(await readText(file)) }];
         if (!st.sheets.length || !st.sheets.some((sh2) => sh2.rows.length > 1)) throw new Error('Ce fichier ne contient aucune ligne de données.');
@@ -2248,6 +2256,7 @@
         const parsed = I.parseCSV(await res.text());
         if (parsed.length < 2) throw new Error('La feuille est vide.');
         st.sheets = [{ name: 'Google Sheets', rows: parsed }];
+        st.savedDate = null;
         st.source = 'Google Sheets';
         st.fromLink = true;
         useSheet(0);
@@ -2286,8 +2295,10 @@
           'Pour les symboles sans suffixe (.TO) ni devise USD'));
       } else {
         list.push(h('div', { class: 'field' }, h('label', { for: 'hold-date', text: 'Valeur en date du' }),
-          h('input', { id: 'hold-date', type: 'date', value: st.date, onchange: (e) => { st.date = e.target.value || todayISO(); analyze(); draw(); } }),
-          h('span', { class: 'hint', text: 'Quand le fichier n’a pas de date' })));
+          h('input', { id: 'hold-date', type: 'date', value: st.date, onchange: (e) => { st.date = e.target.value || todayISO(); st.dateSrc = 'typed'; analyze(); draw(); } }),
+          h('span', { class: 'hint', text: st.dateSrc === 'asof' ? 'Lue dans la feuille (« As of » / « En date du »). Pour les lignes sans date.'
+            : st.dateSrc === 'saved' ? 'Date d’enregistrement du fichier Excel. Pour les lignes sans date.'
+              : 'Pour les lignes sans date. Ajoute une cellule « As of » avec la date au-dessus du tableau pour qu’elle soit lue.' })));
         list.push(sel('hold-freq', 'Mise à jour prévue', st.freq, { '': 'Aucun rappel', monthly: 'Chaque mois', quarterly: 'Chaque trimestre' }, (v) => { st.freq = v; }, 'Pour les nouveaux placements'));
       }
       return h('div', { class: 'fields' }, list);
