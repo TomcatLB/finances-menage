@@ -445,10 +445,31 @@
     const open = (hd) => ({ class: 'click', tabindex: '0', onclick: () => openHolding(hd), onkeydown: (e) => { if (e.key === 'Enter') openHolding(hd); } });
     const sharePct = (v) => h('span', { class: 'sub', text: v !== null && p.mv > 0 ? fmtPct.format(v / p.mv) : '' });
 
+    // Same columns for public and private holdings: quantity, average cost, last price (in the holding's currency),
+    // then book value, market value and gain in CAD.
+    // On a phone: name, market value and gain (plus the price for listed titles).
+    const holdingHead = (first, priceSm = true) => h('thead', null, h('tr', null, h('th', { text: first }),
+      h('th', { class: 'r hide-sm', text: 'Quantité' }), h('th', { class: 'r hide-sm', text: 'Coût moyen' }), h('th', { class: priceSm ? 'r' : 'r hide-sm', text: 'Cours' }),
+      h('th', { class: 'r hide-sm', text: 'Valeur comptable' }), h('th', { class: 'r', text: 'Valeur marchande' }), h('th', { class: 'r', text: 'Gain en capital' })));
+    const holdingCells = (r, priceNote, priceSm = true) => {
+      const hd = r.h;
+      const cash = hd.market === 'CASH';
+      const hasCost = !cash && hd.avg_cost !== null && hd.avg_cost !== undefined && hd.avg_cost !== '';
+      const shown = r.mv === null ? null : r.mv * r.f;
+      const gain = r.mv === null || !hasCost ? null : (r.mv - r.cost) * r.f;
+      return [
+        h('td', { class: 'r hide-sm' }, cash ? '—' : fmtQty.format(num(hd.qty))),
+        h('td', { class: 'r hide-sm' }, hasCost ? native(num(hd.avg_cost), hd.currency) : '—'),
+        h('td', { class: priceSm ? 'r' : 'r hide-sm' }, cash ? '—' : native(r.px, hd.currency), h('span', { class: 'sub' }, cash ? null : priceNote)),
+        h('td', { class: 'r hide-sm' }, gain === null ? '—' : money(r.cost * r.f)),
+        h('td', { class: 'r' }, shown === null ? '—' : money(shown), sharePct(shown)),
+        h('td', { class: 'r ' + cls(gain || 0) }, gain === null ? '—' : moneySigned(gain),
+          h('span', { class: 'sub', text: gain !== null && r.cost > 0 ? fmtPctS.format((r.mv - r.cost) / r.cost) : '' })),
+      ];
+    };
+
     const pubBody = pub.map((r) => {
       const hd = r.h;
-      const shown = r.mv === null ? null : r.mv * r.f;
-      const gain = r.mv === null ? null : (r.mv - r.cost) * r.f;
       let priceNote;
       if (r.src === 'close') priceNote = fmtDate(r.date, { day: 'numeric', month: 'short' });
       else if (r.src === 'cost') priceNote = h('span', { class: 'pill warn', text: 'au coût' });
@@ -457,46 +478,33 @@
           hd.market === 'CASH' ? h('span', { class: 'ticker', text: 'ENCAISSE' }) : h('span', { class: 'ticker', text: hd.symbol.toUpperCase() }),
           ' ', hd.currency === 'USD' ? h('span', { class: 'pill info', text: 'USD' }) : null,
           h('span', { class: 'sub', text: [hd.name, hd.account, ownerName(hd.owner) + (r.f < 1 ? ' (50 %)' : '')].filter(Boolean).join(' · ') })),
-        h('td', { class: 'r hide-sm' }, hd.market === 'CASH' ? '—' : fmtQty.format(num(hd.qty))),
-        h('td', { class: 'r hide-sm' }, hd.market === 'CASH' ? '—' : native(num(hd.avg_cost), hd.currency)),
-        h('td', { class: 'r' }, hd.market === 'CASH' ? '—' : native(r.px, hd.currency), h('span', { class: 'sub' }, hd.market === 'CASH' ? null : priceNote)),
-        h('td', { class: 'r' }, shown === null ? '—' : money(shown), sharePct(shown)),
-        h('td', { class: 'r ' + cls(gain || 0) }, gain === null || hd.market === 'CASH' ? '—' : moneySigned(gain),
-          h('span', { class: 'sub', text: gain !== null && r.cost > 0 && hd.market !== 'CASH' ? fmtPctS.format((r.mv - r.cost) / r.cost) : '' })));
+        ...holdingCells(r, priceNote));
     });
     const pubLink = !!S.settings.public_sheet_url;
     root.append(card('Placements publics', pub.length ? `${pub.length} position(s) · ${money(sum(pub))} · cours de clôture mis à jour chaque soir de bourse` : 'Actions, FNB et encaisse : le cours se met à jour chaque soir de bourse.',
       [h('button', { class: 'btn', type: 'button', onclick: () => openHoldingsImport('public'), text: pubLink ? 'Mettre à jour (Google Sheets)' : 'Importer' }),
         addBtn('Ajouter un placement', () => openHolding())],
       pub.length ? h('div', { class: 'table-wrap' }, h('table', null,
-        h('thead', null, h('tr', null, h('th', { text: 'Titre' }), h('th', { class: 'r hide-sm', text: 'Quantité' }), h('th', { class: 'r hide-sm', text: 'Coût moyen' }),
-          h('th', { class: 'r', text: 'Cours' }), h('th', { class: 'r', text: 'Valeur (CAD)' }), h('th', { class: 'r', text: 'Gain / perte' }))),
+        holdingHead('Titre'),
         h('tbody', null, pubBody))) : h('p', { class: 'footnote', text: 'Aucun placement public. Importe un relevé de ton courtier (Excel ou CSV) ou ajoute les titres un à un.' }),
-      pub.length ? h('p', { class: 'footnote', text: 'Clique sur une ligne pour la modifier. Le coût des titres en USD est converti au taux du jour; pour l’impôt, le prix de base rajusté utilise le taux de la date d’achat.' }) : null));
+      pub.length ? h('p', { class: 'footnote', text: 'Clique sur une ligne pour la modifier. Coût moyen et cours dans la devise du titre; valeurs et gains en CAD. Le coût des titres en USD est converti au taux du jour; pour l’impôt, le prix de base rajusté utilise le taux de la date d’achat.' }) : null));
 
     const privBody = priv.map((r) => {
       const hd = r.h;
-      const shown = r.mv === null ? null : r.mv * r.f;
-      const gain = r.mv === null || hd.avg_cost === null || hd.avg_cost === undefined ? null : (r.mv - r.cost) * r.f;
       const late = privateDue(hd);
       return h('tr', open(hd),
         h('td', null,
           h('strong', { text: hd.name || hd.symbol }), ' ', hd.currency === 'USD' ? h('span', { class: 'pill info', text: 'USD' }) : null,
           late ? h('span', { class: 'pill warn', text: 'à mettre à jour' }) : null,
           h('span', { class: 'sub', text: [hd.account, ownerName(hd.owner) + (r.f < 1 ? ' (50 %)' : ''), hd.institution, FREQ_LABEL[hd.update_freq]].filter(Boolean).join(' · ') })),
-        h('td', { class: 'r' }, shown === null ? '—' : money(shown),
-          h('span', { class: 'sub' }, r.src === 'manual' ? (r.date ? 'au ' + fmtDate(r.date) : '') : h('span', { class: 'pill warn', text: 'au coût' }))),
-        h('td', { class: 'r hide-sm' }, gain === null ? '—' : money(r.cost * r.f)),
-        h('td', { class: 'r ' + cls(gain || 0) }, gain === null ? '—' : moneySigned(gain),
-          h('span', { class: 'sub', text: gain !== null && r.cost > 0 ? fmtPctS.format((r.mv - r.cost) / r.cost) : '' })));
+        ...holdingCells(r, r.src === 'manual' ? (r.date ? 'au ' + fmtDate(r.date) : '') : h('span', { class: 'pill warn', text: 'au coût' }), false));
     });
     const privLink = !!S.settings.private_sheet_url;
     root.append(card('Placements privés', priv.length ? `${priv.length} placement(s) · ${money(sum(priv))} · valeur entrée à la main ou importée` : 'Fonds privés, actions d’une compagnie, prêts privés, immobilier en parts… mis à jour chaque mois ou trimestre.',
       [h('button', { class: 'btn', type: 'button', onclick: () => openHoldingsImport('private'), text: privLink ? 'Mettre à jour (Google Sheets)' : 'Importer / mettre à jour' }),
         addBtn('Ajouter un placement privé', () => openHolding(null, { market: 'MANUAL' }))],
       priv.length ? h('div', { class: 'table-wrap' }, h('table', null,
-        h('thead', null, h('tr', null, h('th', { text: 'Placement' }), h('th', { class: 'r', text: 'Valeur (CAD)' }), h('th', { class: 'r hide-sm', text: 'Investi' }),
-          h('th', { class: 'r', text: 'Gain / perte' }))),
+        holdingHead('Placement', false),
         h('tbody', null, privBody))) : h('p', { class: 'footnote', text: 'Aucun placement privé. Ajoute-les un à un, ou importe une feuille avec une ligne par placement (nom, valeur, montant investi, date).' }),
       priv.length ? h('p', { class: 'footnote', text: 'Pour mettre à jour : clique sur une ligne, ou importe une nouvelle version du fichier ou du lien. Les lignes reconnues sont mises à jour, les nouvelles sont ajoutées.' }) : null));
     if (!S.outdated) root.append(allocationCard(p), tradesCard(), roomCard());
