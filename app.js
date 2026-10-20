@@ -34,6 +34,9 @@
   const natureOf = (g) => (VAR_GROUPS.includes(g) ? 'variable' : 'fixed');
   const INC_GROUPS = ['Salaire net', 'Travail autonome', 'Allocations familiales', 'Revenus de placement', 'Autre revenu'];
   const SAVINGS_GROUP = 'Épargne et placements';
+  /** Income groups that can be entered gross (before tax), and how each is taxed. */
+  const GROSS_KIND = { 'Salaire net': 'employment', 'Travail autonome': 'selfEmployed', 'Revenus de placement': 'other', 'Autre revenu': 'other' };
+  const isGross = (b) => b.kind === 'income' && !!b.gross && !!GROSS_KIND[b.grp];
   const DEBT_FREQS = Object.fromEntries(Object.entries(FREQS).filter(([k]) => k !== 'yearly').map(([k, v]) => [k, v.label]));
   const ALL_FREQS = Object.fromEntries(Object.entries(FREQS).map(([k, v]) => [k, v.label]));
   const TABS = [['portfolio', 'Portfolio'], ['actifs', 'Actifs'], ['budget', 'Budget'], ['enfants', 'Enfants'], ['dettes', 'Dettes'], ['projets', 'Projets'],
@@ -230,8 +233,30 @@
     return { rows, total, monthlyPay, monthlyInterest, avgRate: total > 0 ? rateW / total : 0 };
   }
 
+  /**
+   * Monthly amount of each budget line, after tax. Gross income lines are added up per person
+   * (joint lines 50/50) and taxed together; each line keeps that person's average after-tax share.
+   */
+  function budgetNet() {
+    const out = new Map();
+    const per = { p1: { employment: 0, selfEmployed: 0, other: 0 }, p2: { employment: 0, selfEmployed: 0, other: 0 } };
+    const gross = [];
+    for (const b of S.budget) {
+      const m = C.monthly(b.amount, b.freq);
+      if (!isGross(b)) { out.set(b, m); continue; }
+      for (const [p, part] of owners(b)) per[p][GROSS_KIND[b.grp]] += m * 12 * part;
+      gross.push([b, m]);
+    }
+    if (!gross.length) return out;
+    const keep = {};
+    for (const p of ['p1', 'p2']) keep[p] = 1 - T().netIncome(per[p]).rate;
+    for (const [b, m] of gross) out.set(b, owners(b).reduce((a, [p, part]) => a + m * part * keep[p], 0));
+    return out;
+  }
+
   function budgetView() {
-    const items = S.budget.map((b) => ({ b, f: sh(b.owner), m: C.monthly(b.amount, b.freq) })).filter((r) => r.f);
+    const net = budgetNet();
+    const items = S.budget.map((b) => ({ b, f: sh(b.owner), m: net.get(b) })).filter((r) => r.f);
     const income = items.filter((r) => r.b.kind === 'income');
     const fixed = items.filter((r) => r.b.kind === 'expense' && r.b.nature !== 'variable');
     const envelopes = items.filter((r) => r.b.kind === 'expense' && r.b.nature === 'variable');
@@ -956,15 +981,18 @@
     const head = (title) => h('thead', null, h('tr', null, h('th', { text: title }), h('th', { class: 'r hide-sm', text: 'Montant' }), h('th', { class: 'r', text: 'Par mois' })));
     const line = (r) => clickRow(() => openBudget(r.b),
       h('td', null, r.b.name, h('span', { class: 'sub', text: [r.b.child_id ? childName(r.b.child_id) : null, r.b.grp, ownerNote(r.b.owner, r.f)].filter(Boolean).join(' · ') })),
-      h('td', { class: 'r hide-sm' }, native(num(r.b.amount), 'CAD'), h('span', { class: 'sub', text: (FREQS[r.b.freq] || FREQS.monthly).label })),
+      h('td', { class: 'r hide-sm' }, native(num(r.b.amount), 'CAD'), h('span', { class: 'sub', text: (FREQS[r.b.freq] || FREQS.monthly).label + (isGross(r.b) ? ' · brut' : '') })),
       h('td', { class: 'r', text: money(r.m * r.f) }));
     const total = (v) => h('tfoot', null, h('tr', null, h('td', { text: 'Total' }), h('td', { class: 'hide-sm' }), h('td', { class: 'r', text: money(v) })));
     const importBtn = h('button', { class: 'btn', type: 'button', onclick: openImport, text: 'Importer des relevés' });
 
     root.append(card('Revenus', null, [addBtn('Ajouter un revenu', () => openBudget({ kind: 'income' }))],
       b.income.length
-        ? h('div', { class: 'table-wrap' }, h('table', null, head('Source'), h('tbody', null, b.income.map(line)), total(b.inc)))
-        : h('p', { class: 'footnote', text: 'Ajoute les salaires nets (après impôts), allocations et autres revenus, ou importe un relevé pour les détecter.' })));
+        ? [h('div', { class: 'table-wrap' }, h('table', null, head('Source'), h('tbody', null, b.income.map(line)), total(b.inc))),
+          b.income.some((r) => isGross(r.b))
+            ? h('p', { class: 'footnote', text: 'Revenus bruts : « Par mois » est une estimation après impôts et cotisations (RRQ, RQAP, FSS), calculée par personne sur ses revenus bruts du Budget seulement. Non modélisés : déductions (REER, frais), crédits, autres revenus et impôt retenu à la source réel.' })
+            : null]
+        : h('p', { class: 'footnote', text: 'Ajoute les salaires (bruts ou nets), allocations et autres revenus, ou importe un relevé pour les détecter.' })));
 
     const fixedRows = [...b.fixed].sort((x, y) => x.b.grp.localeCompare(y.b.grp, 'fr') || y.m - x.m).map(line);
     const debtRows = b.debtLines.map((d) => h('tr', null,
@@ -1279,8 +1307,9 @@
     const sumKinds = (kinds) => S.assets.filter((a) => kinds.includes(a.kind)).reduce((t, a) => t + num(a.value), 0);
     const debts = S.debts.map((d) => ({ balance: num(d.balance), payment: C.effectivePayment(d).payment, periods: (FREQS[d.freq] || FREQS.monthly).n, rate: C.periodRate(d) }));
     const incomes = [], expenses = [];
+    const net = budgetNet();
     for (const b of S.budget) {
-      const annual = C.monthly(b.amount, b.freq) * 12;
+      const annual = net.get(b) * 12;
       if (b.kind === 'income') {
         if (b.grp === 'Revenus de placement') continue; // already in the investment return
         incomes.push({ annual, owner: b.owner, kind: b.grp === 'Allocations familiales' ? 'allowance' : b.grp === 'Autre revenu' ? 'other' : 'work' });
@@ -1821,7 +1850,7 @@
     const base = b || {};
     const kind = base.kind || 'expense';
     const forChild = !!base.child_id || isChildGroup(base.grp);
-    const v = existing ? { ...base } : {
+    const v = existing ? { ...base, basis: base.gross ? 'gross' : 'net' } : {
       kind, nature: base.nature || 'fixed', child_id: base.child_id || (forChild && S.children[0] ? S.children[0].id : null),
       grp: base.grp || (kind === 'income' ? INC_GROUPS[0] : forChild ? CHILD_GROUPS[0] : base.nature === 'variable' ? VAR_GROUPS[0] : FIXED_GROUPS[0]),
       freq: 'monthly', owner: 'joint',
@@ -1843,12 +1872,17 @@
         { k: 'grp', label: 'Catégorie', type: 'select', options: groupsFor },
         { k: 'name', label: 'Description', type: 'text', req: true, wide: true,
           placeholder: kind === 'income' ? 'Salaire net' : forChild ? 'CPE / garderie' : v.nature === 'variable' ? 'Voyages' : 'Loyer' },
-        { k: 'amount', label: (s) => (s.nature === 'variable' && s.kind === 'expense' ? 'Montant prévu' : 'Montant'), type: 'num', req: true },
+        { k: 'basis', label: 'Montant entré', type: 'select', options: { net: 'Net (après impôts)', gross: 'Brut (avant impôts)' },
+          show: (s) => s.kind === 'income' && !!GROSS_KIND[s.grp], hint: (s) => (s.basis === 'gross' ? 'Le Budget estime le net avec les taux du Québec et du fédéral.' : null) },
+        { k: 'amount', label: (s) => (s.nature === 'variable' && s.kind === 'expense' ? 'Montant prévu' : s.kind === 'income' && s.basis === 'gross' && GROSS_KIND[s.grp] ? 'Montant brut' : 'Montant'), type: 'num', req: true },
         { k: 'freq', label: 'Fréquence', type: 'select', options: ALL_FREQS },
         { k: 'owner', label: 'Pour', type: 'owner' },
       ],
       onSave: (out) => {
         const row = { ...out, id: existing ? base.id : undefined };
+        row.gross = row.kind === 'income' && row.basis === 'gross' && !!GROSS_KIND[row.grp];
+        delete row.basis;
+        if (!row.gross && !(existing && 'gross' in base)) delete row.gross; // older database without the column
         if (row.kind === 'income') { row.nature = 'fixed'; row.child_id = null; }
         if (forChild) { row.kind = 'expense'; row.nature = 'fixed'; row.child_id = out.child_id || null; }
         else if (row.kind === 'expense') row.child_id = null;
@@ -1988,6 +2022,18 @@
 
     async function readFiles(fileList) {
       for (const file of fileList) {
+        if (/\.pdf$/i.test(file.name) || file.type === 'application/pdf') {
+          st.files = st.files.filter((f) => f.name !== file.name);
+          try {
+            const pdf = await I.readPdfStatement(await file.arrayBuffer());
+            st.files.push({ name: file.name, rows: pdf.rows, cols: { date: 0, desc: [1], amount: 2, debit: -1, credit: -1 }, pdf: true,
+              note: pdf.count ? null : pdf.hasText ? 'aucune transaction reconnue dans ce PDF. Essaie le CSV de ce compte.' : 'ce PDF ne contient pas de texte (document numérisé?). Essaie le CSV de ce compte.' });
+          } catch (e) {
+            st.files.push({ name: file.name, rows: [], cols: { date: 0, desc: [1], amount: 2, debit: -1, credit: -1 }, pdf: true,
+              note: e.message === 'pdf-encrypted' ? 'ce PDF est protégé par un mot de passe. Essaie le CSV de ce compte.' : 'ce fichier ne se lit pas comme un PDF.' });
+          }
+          continue;
+        }
         const text = await readText(file);
         const rows = I.parseCSV(text);
         if (rows.length < 2) { st.files.push({ name: file.name, rows, cols: { date: -1, desc: [], amount: -1, debit: -1, credit: -1 } }); continue; }
@@ -2012,13 +2058,13 @@
     }
 
     function draw() {
-      const fileInput = h('input', { type: 'file', id: 'import-files', accept: '.csv,text/csv', multiple: true,
+      const fileInput = h('input', { type: 'file', id: 'import-files', accept: '.csv,text/csv,.pdf,application/pdf', multiple: true,
         onchange: (e) => readFiles(e.target.files) });
       const top = [
         h('h2', { text: 'Importer des relevés' }),
-        h('p', { class: 'footnote', text: 'Dans RBC Banque en direct : ouvre le compte (ou la carte), choisis la période, puis Télécharger / Exporter au format CSV. Importe 2 à 3 mois, un fichier par compte. Le fichier est lu dans ton navigateur : il n’est pas envoyé ni conservé, seules les lignes que tu ajoutes au budget sont enregistrées.' }),
+        h('p', { class: 'footnote', text: 'Dans RBC Banque en direct : ouvre le compte (ou la carte), choisis la période, puis Télécharger / Exporter au format CSV. Les relevés PDF fonctionnent aussi (un fichier par mois). Importe 2 à 3 mois pour chaque compte. Le fichier est lu dans ton navigateur : il n’est pas envoyé ni conservé, seules les lignes que tu ajoutes au budget sont enregistrées.' }),
         h('div', { class: 'fields' },
-          h('div', { class: 'field' }, h('label', { for: 'import-files', text: 'Fichiers CSV' }), fileInput),
+          h('div', { class: 'field' }, h('label', { for: 'import-files', text: 'Fichiers CSV ou PDF' }), fileInput),
           h('div', { class: 'field' }, h('label', { for: 'import-owner', text: 'À qui sont ces comptes?' }),
             h('select', { id: 'import-owner', onchange: (e) => { st.owner = e.target.value; } },
               Object.entries(ownerOptions()).map(([k, l]) => h('option', { value: k, selected: k === st.owner ? true : null, text: l }))))),
@@ -2026,9 +2072,10 @@
       const body = [];
       if (st.files.length) {
         body.push(h('p', { class: 'footnote', text: 'Fichiers : ' + st.files.map((f) => f.name).join(', ') }));
+        for (const f of st.files) if (f.note) body.push(h('div', { class: 'banner', text: `« ${f.name} » : ${f.note}` }));
         for (const f of st.problems || []) body.push(f.rows.length > 1 ? columnPicker(f) : h('div', { class: 'banner', text: `« ${f.name} » est vide ou n’est pas un CSV lisible.` }));
         for (const f of st.files) {
-          if (f.cols.amount < 0) continue;
+          if (f.cols.amount < 0 || f.pdf) continue;
           body.push(h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: st.flip[f.name] ? true : null,
             onchange: (e) => { st.flip[f.name] = e.target.checked; analyzeAll(); draw(); } }),
           `Dans « ${f.name} », les achats sont des montants positifs (cartes de crédit)`));
@@ -2407,7 +2454,7 @@
       { name: 'Dettes', rows: [['Nom', 'Type', 'Prêteur', 'Solde', 'Solde au', 'Taux %', 'Taux', 'Paiement', 'Fréquence', 'Fin du terme', 'Propriétaire'],
         ...S.debts.map((d) => [d.name, DEBT_KINDS[d.kind], d.lender, n(d.balance), d.balance_date, n(d.rate), d.rate_type === 'variable' ? 'variable' : 'fixe', n(d.payment), (FREQS[d.freq] || {}).label, C.termEnd(d), own(d.owner)])] },
       { name: 'Budget', rows: [['Description', 'Catégorie', 'Type', 'Montant', 'Fréquence', 'Par mois', 'Pour'],
-        ...S.budget.map((b) => [b.name, b.grp, b.kind === 'income' ? 'Revenu' : b.nature === 'variable' ? 'Enveloppe' : 'Dépense fixe', n(b.amount), (FREQS[b.freq] || {}).label, Math.round(C.monthly(b.amount, b.freq) * 100) / 100, own(b.owner)])] },
+        ...(() => { const net = budgetNet(); return S.budget.map((b) => [b.name, b.grp, b.kind === 'income' ? (isGross(b) ? 'Revenu (brut)' : 'Revenu') : b.nature === 'variable' ? 'Enveloppe' : 'Dépense fixe', n(b.amount), (FREQS[b.freq] || {}).label, Math.round(net.get(b) * 100) / 100, own(b.owner)]); })()] },
       { name: 'Dépenses ponctuelles', rows: [['Date', 'Description', 'Catégorie', 'Montant', 'Pour'], ...S.log.map((e) => [e.spend_date, e.label, e.grp, n(e.amount), own(e.owner)])] },
       { name: 'Enfants', rows: [['Nom', 'Naissance', 'Valeur REEE entrée', 'En date du'], ...S.children.map((c) => [c.name, c.birth_date, n(c.resp_value), c.resp_value_date])] },
       { name: 'REEE', rows: [['Enfant', 'Date', 'Type', 'Cotisation', 'SCEE', 'IQEE', 'Note'],
