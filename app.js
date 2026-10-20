@@ -17,6 +17,7 @@
     TSXV: { label: 'TSX Venture', cur: 'CAD', auto: true },
     NEO: { label: 'Cboe Canada (formerly NEO)', cur: 'CAD', auto: true },
     US: { label: 'NYSE / Nasdaq (U.S.)', cur: 'USD', auto: true },
+    CRYPTO: { label: 'Cryptocurrency (BTC, ETH… daily price in USD)', cur: 'USD', auto: true },
     MANUAL: { label: 'Private investment or price entered by hand (mutual fund, crypto…)', cur: null, auto: false },
     CASH: { label: 'Cash in the account', cur: null, auto: false },
   };
@@ -155,7 +156,7 @@
     const m = (e && (e.message || e.error_description)) || String(e);
     if (/row-level security|permission denied/i.test(m)) return 'This account does not have access to this data.';
     if (/Failed to fetch|NetworkError/i.test(m)) return 'Cannot connect. Check your Internet connection.';
-    if (/column .* does not exist|Could not find the .* column/i.test(m)) return 'The database needs an update: in Supabase, run the supabase/schema.sql file again (SQL Editor → Run).';
+    if (/column .* does not exist|Could not find the .* column|holdings_market_check/i.test(m)) return 'The database needs an update: in Supabase, run the supabase/schema.sql file again (SQL Editor → Run).';
     return m;
   }
 
@@ -467,10 +468,31 @@
     const open = (hd) => ({ class: 'click', tabindex: '0', onclick: () => openHolding(hd), onkeydown: (e) => { if (e.key === 'Enter') openHolding(hd); } });
     const sharePct = (v) => h('span', { class: 'sub', text: v !== null && p.mv > 0 ? fmtPct.format(v / p.mv) : '' });
 
+    // Same columns for public and private holdings: quantity, average cost, last price (in the holding's currency),
+    // then book value, market value and gain in CAD.
+    // On a phone: name, market value and gain (plus the price for listed titles).
+    const holdingHead = (first, priceSm = true) => h('thead', null, h('tr', null, h('th', { text: first }),
+      h('th', { class: 'r hide-sm', text: 'Quantity' }), h('th', { class: 'r hide-sm', text: 'Average cost' }), h('th', { class: priceSm ? 'r' : 'r hide-sm', text: 'Price' }),
+      h('th', { class: 'r hide-sm', text: 'Book value' }), h('th', { class: 'r', text: 'Market value' }), h('th', { class: 'r', text: 'Capital gain' })));
+    const holdingCells = (r, priceNote, priceSm = true) => {
+      const hd = r.h;
+      const cash = hd.market === 'CASH';
+      const hasCost = !cash && hd.avg_cost !== null && hd.avg_cost !== undefined && hd.avg_cost !== '';
+      const shown = r.mv === null ? null : r.mv * r.f;
+      const gain = r.mv === null || !hasCost ? null : (r.mv - r.cost) * r.f;
+      return [
+        h('td', { class: 'r hide-sm' }, cash ? '—' : fmtQty.format(num(hd.qty))),
+        h('td', { class: 'r hide-sm' }, hasCost ? native(num(hd.avg_cost), hd.currency) : '—'),
+        h('td', { class: priceSm ? 'r' : 'r hide-sm' }, cash ? '—' : native(r.px, hd.currency), h('span', { class: 'sub' }, cash ? null : priceNote)),
+        h('td', { class: 'r hide-sm' }, gain === null ? '—' : money(r.cost * r.f)),
+        h('td', { class: 'r' }, shown === null ? '—' : money(shown), sharePct(shown)),
+        h('td', { class: 'r ' + cls(gain || 0) }, gain === null ? '—' : moneySigned(gain),
+          h('span', { class: 'sub', text: gain !== null && r.cost > 0 ? fmtPctS.format((r.mv - r.cost) / r.cost) : '' })),
+      ];
+    };
+
     const pubBody = pub.map((r) => {
       const hd = r.h;
-      const shown = r.mv === null ? null : r.mv * r.f;
-      const gain = r.mv === null ? null : (r.mv - r.cost) * r.f;
       let priceNote;
       if (r.src === 'close') priceNote = fmtDate(r.date, { day: 'numeric', month: 'short' });
       else if (r.src === 'cost') priceNote = h('span', { class: 'pill warn', text: 'at cost' });
@@ -479,46 +501,33 @@
           hd.market === 'CASH' ? h('span', { class: 'ticker', text: 'CASH' }) : h('span', { class: 'ticker', text: hd.symbol.toUpperCase() }),
           ' ', hd.currency === 'USD' ? h('span', { class: 'pill info', text: 'USD' }) : null,
           h('span', { class: 'sub', text: [L(hd.name), L(hd.account), ownerName(hd.owner) + (r.f < 1 ? ' (50%)' : '')].filter(Boolean).join(' · ') })),
-        h('td', { class: 'r hide-sm' }, hd.market === 'CASH' ? '—' : fmtQty.format(num(hd.qty))),
-        h('td', { class: 'r hide-sm' }, hd.market === 'CASH' ? '—' : native(num(hd.avg_cost), hd.currency)),
-        h('td', { class: 'r' }, hd.market === 'CASH' ? '—' : native(r.px, hd.currency), h('span', { class: 'sub' }, hd.market === 'CASH' ? null : priceNote)),
-        h('td', { class: 'r' }, shown === null ? '—' : money(shown), sharePct(shown)),
-        h('td', { class: 'r ' + cls(gain || 0) }, gain === null || hd.market === 'CASH' ? '—' : moneySigned(gain),
-          h('span', { class: 'sub', text: gain !== null && r.cost > 0 && hd.market !== 'CASH' ? fmtPctS.format((r.mv - r.cost) / r.cost) : '' })));
+        ...holdingCells(r, priceNote));
     });
     const pubLink = !!S.settings.public_sheet_url;
     root.append(card('Public investments', pub.length ? `${pub.length} position(s) · ${money(sum(pub))} · closing prices updated every trading evening` : 'Stocks, ETFs and cash: the price updates every trading evening.',
       [h('button', { class: 'btn', type: 'button', onclick: () => openHoldingsImport('public'), text: pubLink ? 'Update (Google Sheets)' : 'Import' }),
         addBtn('Add an investment', () => openHolding())],
       pub.length ? h('div', { class: 'table-wrap' }, h('table', null,
-        h('thead', null, h('tr', null, h('th', { text: 'Security' }), h('th', { class: 'r hide-sm', text: 'Quantity' }), h('th', { class: 'r hide-sm', text: 'Average cost' }),
-          h('th', { class: 'r', text: 'Price' }), h('th', { class: 'r', text: 'Value (CAD)' }), h('th', { class: 'r', text: 'Gain / loss' }))),
+        holdingHead('Security'),
         h('tbody', null, pubBody))) : h('p', { class: 'footnote', text: 'No public investments. Import a statement from your broker (Excel or CSV) or add securities one by one.' }),
-      pub.length ? h('p', { class: 'footnote', text: 'Click a row to edit it. The cost of USD securities is converted at today’s rate; for tax, the adjusted cost base uses the rate on the purchase date.' }) : null));
+      pub.length ? h('p', { class: 'footnote', text: 'Click a row to edit it. Average cost and price in the security’s currency; values and gains in CAD. The cost of USD securities is converted at today’s rate; for tax, the adjusted cost base uses the rate on the purchase date.' }) : null));
 
     const privBody = priv.map((r) => {
       const hd = r.h;
-      const shown = r.mv === null ? null : r.mv * r.f;
-      const gain = r.mv === null || hd.avg_cost === null || hd.avg_cost === undefined ? null : (r.mv - r.cost) * r.f;
       const late = privateDue(hd);
       return h('tr', open(hd),
         h('td', null,
           h('strong', { text: hd.name || hd.symbol }), ' ', hd.currency === 'USD' ? h('span', { class: 'pill info', text: 'USD' }) : null,
           late ? h('span', { class: 'pill warn', text: 'needs update' }) : null,
           h('span', { class: 'sub', text: [L(hd.account), ownerName(hd.owner) + (r.f < 1 ? ' (50%)' : ''), hd.institution, FREQ_LABEL[hd.update_freq]].filter(Boolean).join(' · ') })),
-        h('td', { class: 'r' }, shown === null ? '—' : money(shown),
-          h('span', { class: 'sub' }, r.src === 'manual' ? (r.date ? 'as of ' + fmtDate(r.date) : '') : h('span', { class: 'pill warn', text: 'at cost' }))),
-        h('td', { class: 'r hide-sm' }, gain === null ? '—' : money(r.cost * r.f)),
-        h('td', { class: 'r ' + cls(gain || 0) }, gain === null ? '—' : moneySigned(gain),
-          h('span', { class: 'sub', text: gain !== null && r.cost > 0 ? fmtPctS.format((r.mv - r.cost) / r.cost) : '' })));
+        ...holdingCells(r, r.src === 'manual' ? (r.date ? 'as of ' + fmtDate(r.date) : '') : h('span', { class: 'pill warn', text: 'at cost' }), false));
     });
     const privLink = !!S.settings.private_sheet_url;
     root.append(card('Private investments', priv.length ? `${priv.length} investment(s) · ${money(sum(priv))} · value entered by hand or imported` : 'Private funds, shares of a company, private loans, real estate units… updated every month or quarter.',
       [h('button', { class: 'btn', type: 'button', onclick: () => openHoldingsImport('private'), text: privLink ? 'Update (Google Sheets)' : 'Import / update' }),
         addBtn('Add a private investment', () => openHolding(null, { market: 'MANUAL' }))],
       priv.length ? h('div', { class: 'table-wrap' }, h('table', null,
-        h('thead', null, h('tr', null, h('th', { text: 'Investment' }), h('th', { class: 'r', text: 'Value (CAD)' }), h('th', { class: 'r hide-sm', text: 'Invested' }),
-          h('th', { class: 'r', text: 'Gain / loss' }))),
+        holdingHead('Investment', false),
         h('tbody', null, privBody))) : h('p', { class: 'footnote', text: 'No private investments. Add them one by one, or import a sheet with one row per investment (name, value, amount invested, date).' }),
       priv.length ? h('p', { class: 'footnote', text: 'To update: click a row, or import a new version of the file or link. Rows it recognizes are updated, new ones are added.' }) : null));
     if (!S.outdated) root.append(allocationCard(p), tradesCard(), roomCard());
@@ -545,7 +554,7 @@
   function holdingMix(hd) {
     if (hd.asset_class && CLASSES[hd.asset_class]) return { [hd.asset_class]: 1 };
     if (hd.market === 'CASH') return { cash: 1 };
-    if (hd.market === 'MANUAL') return { other: 1 };
+    if (hd.market === 'MANUAL' || hd.market === 'CRYPTO') return { other: 1 };
     return ETF_MIX[String(hd.symbol || '').toUpperCase()] || { equity: 1 };
   }
 
@@ -743,7 +752,7 @@
     return card(`Contribution room ${year}`, 'Each person’s TFSA and RRSP, from the CRA amounts and your entries', null,
       people.length ? h('div', { class: 'rooms' }, people.flatMap((p) => [block(p, 'CELI'), block(p, 'REER')])) : h('p', { class: 'footnote', text: 'Pick a person at the top to see their room.' }),
       recent.length ? h('div', { class: 'table-wrap' }, h('table', null, h('tbody', null, recent.map((c) => clickRow(() => openContribution(c),
-        h('td', null, `${kindLabel[c.kind]} ${PLAN_LABEL[c.plan]}`, h('span', { class: 'sub', text: `${ownerName(c.owner)} · year ${c.year}${c.note ? ' · ' + c.note : ''}` })),
+        h('td', null, `${PLAN_LABEL[c.plan]} ${kindLabel[c.kind].toLowerCase()}`, h('span', { class: 'sub', text: `${ownerName(c.owner)} · year ${c.year}${c.note ? ' · ' + c.note : ''}` })),
         h('td', { class: 'r' }, (c.kind === 'withdrawal' ? '− ' : '') + money(num(c.amount)), h('span', { class: 'sub', text: fmtDate(c.entry_date) }))))))) : null,
       h('p', { class: 'footnote', text: `RRSP: a contribution made in the first 60 days of the year can count for the year before (pick the year in the form); a $2,000 over-contribution is allowed. TFSA: a withdrawal gives the room back only on the next January 1. New TFSA room ${year}: ${money(T().PARAMS.tfsaLimit)}; RRSP limit ${year}: ${money(T().PARAMS.rrspLimit)}.` }));
   }
@@ -2215,7 +2224,7 @@
       source: '', sheets: [], sheetIdx: 0, header: 0, cols: null, error: '', loading: false,
       link: S.settings[linkKey] || '', fromLink: false,
       owner: S.who === 'all' ? (priv ? 'joint' : 'p1') : S.who,
-      account: priv ? 'Non enregistré' : 'CELI', market: 'TSX', date: todayISO(), freq: 'quarterly',
+      account: priv ? 'Non enregistré' : 'CELI', market: 'TSX', date: todayISO(), dateSrc: '', savedDate: null, freq: 'quarterly',
       candidates: [], plan: null, picks: new Map(), remove: new Set(),
     };
     const close = () => { sheet.hidden = true; sheet.replaceChildren(); document.removeEventListener('keydown', onKey); };
@@ -2226,6 +2235,9 @@
       st.sheetIdx = i;
       st.header = I.findHeaderRow(rows());
       st.cols = I.detectHoldingColumns(rows()[st.header] || []);
+      // Value date: an "As of" cell above the table, else the day the .xlsx was saved, else today.
+      const asOf = I.asOfDate(rows(), st.header);
+      [st.date, st.dateSrc] = asOf ? [asOf, 'asof'] : st.savedDate ? [st.savedDate, 'saved'] : [todayISO(), ''];
       analyze();
     }
     function analyze() {
@@ -2233,6 +2245,7 @@
       st.candidates = I.toHoldings(rows(), st.header, st.cols, {
         kind, owner: st.owner, account: st.account, market: st.market, date: st.date,
         ownerNames: { p1: S.settings.p1_name, p2: S.settings.p2_name },
+        publicSymbols: priv ? new Set(S.holdings.filter((hd) => !isPrivate(hd) && hd.market !== 'CASH').map((hd) => String(hd.symbol).toUpperCase())) : null,
       });
       st.plan = I.planSync(st.candidates, S.holdings.filter((hd) => isPrivate(hd) === priv));
       st.picks = new Map(st.plan.items.map((it) => [it.key, it.status !== 'same']));
@@ -2243,7 +2256,12 @@
       st.error = '';
       try {
         const name = file.name.toLowerCase();
-        if (/\.xlsx$|\.xlsm$/.test(name)) st.sheets = await I.readXlsx(await readBuffer(file));
+        st.savedDate = null;
+        if (/\.xlsx$|\.xlsm$/.test(name)) {
+          const buf = await readBuffer(file);
+          st.sheets = await I.readXlsx(buf);
+          st.savedDate = await I.xlsxSavedDate(buf).catch(() => null);
+        }
         else if (/\.(xls|ods|numbers)$/.test(name)) throw new Error('This format cannot be read directly. In Excel or Numbers: File → Save As (or Export) → Excel Workbook (.xlsx) or CSV, then import that file.');
         else st.sheets = [{ name: file.name, rows: I.parseCSV(await readText(file)) }];
         if (!st.sheets.length || !st.sheets.some((sh2) => sh2.rows.length > 1)) throw new Error('This file has no data rows.');
@@ -2270,6 +2288,7 @@
         const parsed = I.parseCSV(await res.text());
         if (parsed.length < 2) throw new Error('The sheet is empty.');
         st.sheets = [{ name: 'Google Sheets', rows: parsed }];
+        st.savedDate = null;
         st.source = 'Google Sheets';
         st.fromLink = true;
         useSheet(0);
@@ -2308,8 +2327,10 @@
           'For symbols with no suffix (.TO) and no USD currency'));
       } else {
         list.push(h('div', { class: 'field' }, h('label', { for: 'hold-date', text: 'Value as of' }),
-          h('input', { id: 'hold-date', type: 'date', value: st.date, onchange: (e) => { st.date = e.target.value || todayISO(); analyze(); draw(); } }),
-          h('span', { class: 'hint', text: 'When the file has no date' })));
+          h('input', { id: 'hold-date', type: 'date', value: st.date, onchange: (e) => { st.date = e.target.value || todayISO(); st.dateSrc = 'typed'; analyze(); draw(); } }),
+          h('span', { class: 'hint', text: st.dateSrc === 'asof' ? 'Read from the sheet (“As of” / “En date du”). For rows without a date.'
+            : st.dateSrc === 'saved' ? 'The date the Excel file was saved. For rows without a date.'
+              : 'For rows without a date. Add an “As of” cell with the date above the table so it gets read.' })));
         list.push(sel('hold-freq', 'Planned update', st.freq, { '': 'No reminder', monthly: 'Every month', quarterly: 'Every quarter' }, (v) => { st.freq = v; }, 'For new investments'));
       }
       return h('div', { class: 'fields' }, list);
@@ -2397,6 +2418,7 @@
         }
         const upd = { qty: row.qty };
         if (row.avg_cost !== null) upd.avg_cost = row.avg_cost;
+        if (row.market !== it.match.market || row.currency !== it.match.currency) Object.assign(upd, { market: row.market, currency: row.currency }); // e.g. BTC first saved on the TSX
         if (row.market === 'MANUAL') {
           upd.manual_price = row.manual_price;
           upd.manual_price_date = row.manual_price_date;
