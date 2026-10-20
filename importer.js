@@ -1,5 +1,5 @@
 /*
- * Bank statement import (CSV). Runs entirely in the browser: the file is read
+ * Bank statement import (CSV or PDF). Runs entirely in the browser: the file is read
  * locally and never uploaded. Only the budget lines the person chooses to add
  * are saved.
  *
@@ -642,9 +642,429 @@
     return { items, missing };
   }
 
+  // ===========================================================================
+  // PDF statements (read locally). A small PDF text reader, enough for bank
+  // statements: Flate streams, object streams, ToUnicode maps, form XObjects.
+  // Not handled: encrypted PDFs and scanned images (no text to read).
+  // ===========================================================================
+  const bin = (b) => { let s = ''; for (let i = 0; i < b.length; i += 8192) s += String.fromCharCode.apply(null, b.subarray(i, i + 8192)); return s; };
+  const binBytes = (s) => { const b = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i) & 255; return b; };
+  async function inflate(bytes) {
+    try {
+      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'));
+      return new Uint8Array(await new Response(stream).arrayBuffer());
+    } catch (e) { return null; }
+  }
+
+  function ascii85(bytes) {
+    const t = bin(bytes).replace(/\s/g, '').replace(/^<~/, '').replace(/~>.*$/, '');
+    const out = [];
+    for (let i = 0; i < t.length;) {
+      if (t[i] === 'z') { out.push(0, 0, 0, 0); i++; continue; }
+      const chunk = t.slice(i, i + 5); i += 5;
+      const padded = chunk.padEnd(5, 'u');
+      let v = 0;
+      for (const ch of padded) v = v * 85 + (ch.charCodeAt(0) - 33);
+      const b = [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255];
+      out.push(...b.slice(0, chunk.length - 1));
+    }
+    return new Uint8Array(out);
+  }
+
+  const WS = /[\0\t\n\f\r ]/;
+  const DELIM = /[()<>[\]{}/%]/;
+  /** Parses one PDF object at s[p]. Names come back as '/Name', strings as { s }, references as { ref }. */
+  function pdfValue(s, p) {
+    const skip = () => { for (;;) { while (p < s.length && WS.test(s[p])) p++; if (s[p] !== '%') return; while (p < s.length && s[p] !== '\n' && s[p] !== '\r') p++; } };
+    function val() {
+      skip();
+      const c = s[p];
+      if (c === '<' && s[p + 1] === '<') {
+        p += 2; const d = {};
+        for (;;) { skip(); if (s[p] === '>' && s[p + 1] === '>') { p += 2; return d; } if (p >= s.length) return d; const k = val(); const v = val(); if (typeof k === 'string') d[k.slice(1)] = v; }
+      }
+      if (c === '[') { p++; const a = []; for (;;) { skip(); if (s[p] === ']') { p++; return a; } if (p >= s.length) return a; a.push(val()); } }
+      if (c === '(') { const r = pdfString(s, p); p = r.end; return { s: r.str }; }
+      if (c === '<') { const e = s.indexOf('>', p); const hex = s.slice(p + 1, e).replace(/[^0-9a-f]/gi, ''); p = e + 1; return { s: hexStr(hex) }; }
+      if (c === '/') { let e = p + 1; while (e < s.length && !WS.test(s[e]) && !DELIM.test(s[e])) e++; const n = s.slice(p, e); p = e; return n; }
+      let e = p; while (e < s.length && !WS.test(s[e]) && !DELIM.test(s[e])) e++;
+      const tok = s.slice(p, e); p = e > p ? e : p + 1;
+      if (/^[+-]?(\d+\.?\d*|\.\d+)$/.test(tok)) {
+        const m = /^\s*(\d+)\s+R(?![^\0\t\n\f\r ()<>[\]{}/%])/.exec(s.slice(p, p + 24));
+        if (/^\d+$/.test(tok) && m) { p += m[0].length; return { ref: Number(tok) }; }
+        return Number(tok);
+      }
+      if (tok === 'true') return true;
+      if (tok === 'false') return false;
+      return null;
+    }
+    const v = val();
+    return { v, end: p };
+  }
+  const hexStr = (hex) => { if (hex.length % 2) hex += '0'; let o = ''; for (let i = 0; i < hex.length; i += 2) o += String.fromCharCode(parseInt(hex.substr(i, 2), 16)); return o; };
+  /** Literal string starting at s[p] === '('; returns its bytes as a binary string. */
+  function pdfString(s, p) {
+    let depth = 0, out = '';
+    for (let i = p; i < s.length; i++) {
+      const c = s[i];
+      if (c === '\\') {
+        const n = s[++i];
+        const esc = { n: '\n', r: '\r', t: '\t', b: '\b', f: '\f' }[n];
+        if (esc) out += esc;
+        else if (/[0-7]/.test(n)) { let o = n; while (o.length < 3 && /[0-7]/.test(s[i + 1])) o += s[++i]; out += String.fromCharCode(parseInt(o, 8) & 255); }
+        else if (n === '\r') { if (s[i + 1] === '\n') i++; }
+        else if (n !== '\n') out += n;
+      } else if (c === '(') { if (depth++) out += c; }
+      else if (c === ')') { if (--depth === 0) return { str: out, end: i + 1 }; out += c; }
+      else out += c;
+    }
+    return { str: out, end: s.length };
+  }
+
+  /** Every object of the file: number → { v, data } (data: raw stream bytes, still encoded). */
+  async function pdfObjects(bytes) {
+    const s = bin(bytes);
+    if (!s.startsWith('%PDF')) throw new Error('not-pdf');
+    const objs = new Map();
+    const re = /(\d+)\s+(\d+)\s+obj\b/g;
+    let m;
+    while ((m = re.exec(s))) {
+      const { v, end } = pdfValue(s, m.index + m[0].length);
+      const o = { v };
+      const sm = /^\s*stream\r?\n/.exec(s.slice(end, end + 12));
+      if (sm && v && typeof v === 'object') {
+        const start = end + sm[0].length;
+        let stop = typeof v.Length === 'number' ? start + v.Length : -1;
+        if (stop < 0 || s.slice(stop, stop + 12).indexOf('endstream') < 0) stop = s.indexOf('endstream', start);
+        o.data = bytes.subarray(start, stop);
+        re.lastIndex = stop;
+      }
+      objs.set(Number(m[1]), o);
+    }
+    if (/\/Encrypt\s/.test(s.slice(s.lastIndexOf('trailer') >= 0 ? s.lastIndexOf('trailer') : 0)) || [...objs.values()].some((o) => o.v && o.v.Type === '/XRef' && o.v.Encrypt)) throw new Error('pdf-encrypted');
+    // Objects packed inside object streams.
+    for (const o of [...objs.values()]) {
+      if (!o.data || !o.v || o.v.Type !== '/ObjStm') continue;
+      const raw = await pdfStream(o, objs);
+      if (!raw) continue;
+      const t = bin(raw);
+      const nums = t.slice(0, o.v.First).trim().split(/\s+/).map(Number);
+      for (let i = 0; i + 1 < nums.length; i += 2) if (!objs.has(nums[i])) objs.set(nums[i], { v: pdfValue(t, o.v.First + nums[i + 1]).v });
+    }
+    return objs;
+  }
+  const deref = (v, objs) => { let n = 0; while (v && typeof v === 'object' && 'ref' in v && n++ < 20) v = (objs.get(v.ref) || {}).v; return v; };
+  async function pdfStream(o, objs) {
+    if (!o || !o.data) return null;
+    let f = deref(o.v.Filter, objs);
+    f = Array.isArray(f) ? f : f ? [f] : [];
+    let data = o.data;
+    for (const name of f) {
+      if (name === '/FlateDecode' || name === '/Fl') data = await inflate(data);
+      else if (name === '/ASCII85Decode' || name === '/A85') data = ascii85(data);
+      else return null; // images and other encodings: not needed for text
+      if (!data) return null;
+    }
+    return data;
+  }
+
+  /** ToUnicode CMap → { map: code → text, bytes: code length }. */
+  function parseCMap(t) {
+    const map = new Map();
+    let bytes = 1;
+    const cs = /begincodespacerange\s*<([0-9a-f]+)>/i.exec(t);
+    if (cs) bytes = Math.max(1, cs[1].length / 2);
+    const utf16 = (hex) => { let o = ''; for (let i = 0; i + 3 < hex.length; i += 4) o += String.fromCharCode(parseInt(hex.substr(i, 4), 16)); return hex.length === 2 ? String.fromCharCode(parseInt(hex, 16)) : o; };
+    for (const blk of t.matchAll(/beginbfchar([\s\S]*?)endbfchar/g)) {
+      for (const m of blk[1].matchAll(/<([0-9a-f]+)>\s*<([0-9a-f]*)>/gi)) map.set(parseInt(m[1], 16), utf16(m[2]));
+    }
+    for (const blk of t.matchAll(/beginbfrange([\s\S]*?)endbfrange/g)) {
+      for (const m of blk[1].matchAll(/<([0-9a-f]+)>\s*<([0-9a-f]+)>\s*(<[0-9a-f]*>|\[[^\]]*\])/gi)) {
+        const lo = parseInt(m[1], 16), hi = parseInt(m[2], 16);
+        if (hi - lo > 65535) continue;
+        if (m[3][0] === '[') {
+          const list = [...m[3].matchAll(/<([0-9a-f]*)>/gi)].map((x) => utf16(x[1]));
+          for (let c = lo; c <= hi && c - lo < list.length; c++) map.set(c, list[c - lo]);
+        } else {
+          const hex = m[3].slice(1, -1);
+          const base = parseInt(hex.slice(-4), 16), prefix = utf16(hex.slice(0, -4));
+          for (let c = lo; c <= hi; c++) map.set(c, prefix + String.fromCharCode(base + c - lo));
+        }
+      }
+    }
+    return { map, bytes };
+  }
+  const WIN = { 128: '€', 130: '‚', 132: '„', 133: '…', 145: '‘', 146: '’', 147: '“', 148: '”', 150: '–', 151: '—', 153: '™', 156: 'œ' };
+  async function fontDecoder(fontRef, objs, cache) {
+    const key = fontRef && fontRef.ref;
+    if (key && cache.has(key)) return cache.get(key);
+    const f = deref(fontRef, objs) || {};
+    let dec;
+    const tu = f.ToUnicode && f.ToUnicode.ref ? objs.get(f.ToUnicode.ref) : null;
+    const raw = tu ? await pdfStream(tu, objs) : null;
+    if (raw) {
+      const cm = parseCMap(bin(raw));
+      dec = (str) => { let o = ''; for (let i = 0; i + cm.bytes <= str.length; i += cm.bytes) { let c = 0; for (let k = 0; k < cm.bytes; k++) c = c * 256 + str.charCodeAt(i + k); o += cm.map.has(c) ? cm.map.get(c) : ''; } return o; };
+    } else if (f.Subtype === '/Type0') {
+      dec = (str) => { let o = ''; for (let i = 0; i + 1 < str.length; i += 2) { const c = str.charCodeAt(i) * 256 + str.charCodeAt(i + 1); if (c >= 32 && c < 0xd800) o += String.fromCharCode(c); } return o; };
+    } else {
+      dec = (str) => { let o = ''; for (const ch of str) { const c = ch.charCodeAt(0); o += WIN[c] || (c >= 32 ? ch : ''); } return o; };
+    }
+    if (key) cache.set(key, dec);
+    return dec;
+  }
+
+  /** Splits a content stream into operands and operators. */
+  function* contentTokens(s) {
+    let p = 0;
+    const n = s.length;
+    while (p < n) {
+      const c = s[p];
+      if (WS.test(c)) { p++; continue; }
+      if (c === '%') { while (p < n && s[p] !== '\n' && s[p] !== '\r') p++; continue; }
+      if (c === '(' ) { const r = pdfString(s, p); p = r.end; yield { t: 'str', v: r.str }; continue; }
+      if (c === '<' && s[p + 1] !== '<') { const e = s.indexOf('>', p); yield { t: 'str', v: hexStr(s.slice(p + 1, e).replace(/[^0-9a-f]/gi, '')) }; p = e + 1; continue; }
+      if (c === '<' || c === '>') { p += 2; yield { t: c === '<' ? 'dict(' : 'dict)' }; continue; }
+      if (c === '[' || c === ']') { p++; yield { t: c }; continue; }
+      if (c === '{' || c === '}' || c === ')') { p++; continue; }
+      if (c === '/') { let e = p + 1; while (e < n && !WS.test(s[e]) && !DELIM.test(s[e])) e++; yield { t: 'name', v: s.slice(p, e) }; p = e; continue; }
+      let e = p; while (e < n && !WS.test(s[e]) && !DELIM.test(s[e])) e++;
+      const tok = s.slice(p, e); p = e;
+      if (/^[+-]?(\d+\.?\d*|\.\d+)$/.test(tok)) yield { t: 'num', v: Number(tok) };
+      else if (tok === 'BI') { const ei = s.indexOf('EI', s.indexOf('ID', p)); p = ei < 0 ? n : ei + 2; }
+      else yield { t: 'op', v: tok };
+    }
+  }
+  const mul = (a, b) => [a[0] * b[0] + a[1] * b[2], a[0] * b[1] + a[1] * b[3], a[2] * b[0] + a[3] * b[2], a[2] * b[1] + a[3] * b[3], a[4] * b[0] + a[5] * b[2] + b[4], a[4] * b[1] + a[5] * b[3] + b[5]];
+
+  /** Text pieces of one content stream: { x, y, size, str } in page coordinates. */
+  async function runContent(data, resources, objs, ctx, ctm0, depth) {
+    const out = [];
+    const res = deref(resources, objs) || {};
+    const fonts = deref(res.Font, objs) || {};
+    const xobjs = deref(res.XObject, objs) || {};
+    const s = bin(data);
+    let ctm = ctm0, stack = [], tm = [1, 0, 0, 1, 0, 0], tlm = tm, lead = 0, size = 12, dec = (x) => x, ops = [];
+    const show = (str) => {
+      const text = dec(str);
+      if (!text) return;
+      const m = mul(tm, ctm);
+      const scale = Math.hypot(m[2], m[3]) || 1;
+      out.push({ x: m[4], y: m[5], size: size * scale, str: text });
+      tm = [tm[0], tm[1], tm[2], tm[3], tm[4] + text.length * size * 0.5 * tm[0], tm[5] + text.length * size * 0.5 * tm[1]];
+    };
+    let arr = null;
+    for (const tk of contentTokens(s)) {
+      if (tk.t === '[') { arr = []; continue; }
+      if (tk.t === ']') { ops.push({ t: 'arr', v: arr || [] }); arr = null; continue; }
+      if (arr) { arr.push(tk); continue; }
+      if (tk.t !== 'op') { ops.push(tk); continue; }
+      const num = (i) => (ops[ops.length - i] || {}).v || 0;
+      switch (tk.v) {
+        case 'q': stack.push(ctm); break;
+        case 'Q': ctm = stack.pop() || ctm0; break;
+        case 'cm': ctm = mul([num(6), num(5), num(4), num(3), num(2), num(1)], ctm); break;
+        case 'BT': tm = tlm = [1, 0, 0, 1, 0, 0]; break;
+        case 'Tf': size = num(1); dec = await fontDecoder(fonts[String((ops[ops.length - 2] || {}).v).slice(1)], objs, ctx.fonts); break;
+        case 'TL': lead = num(1); break;
+        case 'Td': tm = tlm = mul([1, 0, 0, 1, num(2), num(1)], tlm); break;
+        case 'TD': lead = -num(1); tm = tlm = mul([1, 0, 0, 1, num(2), num(1)], tlm); break;
+        case 'Tm': tm = tlm = [num(6), num(5), num(4), num(3), num(2), num(1)]; break;
+        case 'T*': tm = tlm = mul([1, 0, 0, 1, 0, -lead], tlm); break;
+        case 'Tj': if (ops.length && ops[ops.length - 1].t === 'str') show(ops[ops.length - 1].v); break;
+        case "'": tm = tlm = mul([1, 0, 0, 1, 0, -lead], tlm); if (ops.length) show(ops[ops.length - 1].v || ''); break;
+        case '"': tm = tlm = mul([1, 0, 0, 1, 0, -lead], tlm); if (ops.length) show(ops[ops.length - 1].v || ''); break;
+        case 'TJ': {
+          const a = (ops[ops.length - 1] || {}).v || [];
+          let buf = '';
+          for (const el of a) {
+            if (el.t === 'str') buf += el.v;
+            else if (el.t === 'num' && el.v < -180 && buf) { show(buf); buf = ''; tm = [tm[0], tm[1], tm[2], tm[3], tm[4] - el.v / 1000 * size * tm[0], tm[5]]; }
+          }
+          if (buf) show(buf);
+          break;
+        }
+        case 'Do': {
+          const xo = xobjs[String((ops[ops.length - 1] || {}).v).slice(1)];
+          const o = xo && xo.ref ? objs.get(xo.ref) : null;
+          if (o && o.v && o.v.Subtype === '/Form' && depth < 5) {
+            const d = await pdfStream(o, objs);
+            const fm = Array.isArray(o.v.Matrix) ? o.v.Matrix : [1, 0, 0, 1, 0, 0];
+            if (d) out.push(...await runContent(d, o.v.Resources || res, objs, ctx, mul(fm, ctm), depth + 1));
+          }
+          break;
+        }
+        default: break;
+      }
+      ops = [];
+    }
+    return out;
+  }
+
+  /** Reads a PDF. Returns its pages, each a list of text lines { y, text, items: [{ x, end, str }] }, top to bottom. */
+  async function readPdfText(buffer) {
+    const bytes = new Uint8Array(buffer);
+    const objs = await pdfObjects(bytes);
+    const ctx = { fonts: new Map() };
+    const pages = [];
+    const inherited = (page, key) => { let n = page, k = 0; while (n && k++ < 30) { if (n[key]) return n[key]; n = deref(n.Parent, objs); } return null; };
+    const pageObjs = [];
+    const root = [...objs.values()].map((o) => o.v).find((v) => v && v.Type === '/Catalog');
+    const walk = (node, k = 0) => {
+      node = deref(node, objs);
+      if (!node || k > 50) return;
+      if (node.Type === '/Page' || (!node.Kids && node.Contents)) pageObjs.push(node);
+      else for (const kid of node.Kids || []) walk(kid, k + 1);
+    };
+    if (root) walk(root.Pages);
+    if (!pageObjs.length) for (const o of objs.values()) if (o.v && o.v.Type === '/Page') pageObjs.push(o.v);
+    for (const page of pageObjs) {
+      let contents = deref(page.Contents, objs);
+      const refs = Array.isArray(contents) ? contents : [page.Contents];
+      const parts = [];
+      for (const r of refs) { const d = await pdfStream(r && r.ref ? objs.get(r.ref) : null, objs); if (d) parts.push(bin(d)); }
+      const items = await runContent(binBytes(parts.join('\n')), inherited(page, 'Resources'), objs, ctx, [1, 0, 0, 1, 0, 0], 0);
+      pages.push(toLines(items));
+    }
+    return pages;
+  }
+
+  /** Groups text pieces into lines (same baseline), left to right. */
+  function toLines(items) {
+    const sorted = items.filter((it) => it.str.trim()).sort((a, b) => b.y - a.y || a.x - b.x);
+    const lines = [];
+    for (const it of sorted) {
+      const tol = Math.max(2, it.size * 0.35);
+      let line = lines.find((l) => Math.abs(l.y - it.y) <= tol);
+      if (!line) { line = { y: it.y, items: [] }; lines.push(line); }
+      line.items.push({ x: it.x, end: it.x + it.str.length * it.size * 0.5, str: it.str });
+    }
+    lines.sort((a, b) => b.y - a.y);
+    for (const l of lines) {
+      l.items.sort((a, b) => a.x - b.x);
+      l.text = l.items.map((i) => i.str).join(' ').replace(/\s+/g, ' ').trim();
+    }
+    return lines;
+  }
+
+  // --- Statement lines → transactions ----------------------------------------
+  const MONTHS = { jan: 1, janv: 1, january: 1, janvier: 1, feb: 2, fev: 2, fevr: 2, february: 2, fevrier: 2, mar: 3, mars: 3, march: 3, apr: 4, avr: 4, april: 4, avril: 4,
+    may: 5, mai: 5, jun: 6, juin: 6, june: 6, jul: 7, juil: 7, july: 7, juillet: 7, aug: 8, aou: 8, aout: 8, august: 8, sep: 9, sept: 9, september: 9, septembre: 9,
+    oct: 10, october: 10, octobre: 10, nov: 11, november: 11, novembre: 11, dec: 12, december: 12, decembre: 12 };
+  const fold = (s) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const MONTH_RE = '(janv(?:ier)?|f[ée]vr?(?:ier)?|mars?|avr(?:il)?|mai|juin|juil(?:let)?|ao[uû]t?|sept?(?:embre)?|oct(?:obre)?|nov(?:embre)?|d[ée]c(?:embre)?|jan(?:uary)?|feb(?:ruary)?|march|apr(?:il)?|may|june?|july?|aug(?:ust)?|september|october|november|december)\\.?';
+  const DATE_START = new RegExp(`^(?:(\\d{1,2})\\s+${MONTH_RE}|${MONTH_RE}\\s+(\\d{1,2})(?![\\d,]))(?:\\s+(20\\d\\d))?\\b`, 'i');
+  const NUM_DATE = /^(\d{4})-(\d{2})-(\d{2})\b|^(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/;
+  const AMOUNT = /^(?:-\s?)?\(?-?\$?\s?\d{1,3}(?:[ ,  ]\d{3})*[.,]\d{2}\s?\$?\)?(?:\s?(?:-|CR))?$/i;
+  const SKIP = /opening balance|closing balance|balance forward|solde (?:d.ouverture|de cl[oô]ture|pr[ée]c[ée]dent|report[ée]|de fermeture|final)|previous (?:statement|account) balance|new balance|nouveau solde|minimum payment|paiement minimum|^total|\btotal\b.*\$|sous-total|subtotal/i;
+  const monthOf = (word) => { const w = fold(word).replace(/\.$/, ''); return MONTHS[w] || MONTHS[w.slice(0, 4)] || MONTHS[w.slice(0, 3)] || null; };
+
+  /** Latest full date written in the text (statement period end), as { y, m }. */
+  function periodEnd(text) {
+    let best = null;
+    const consider = (y, m, d) => { if (!y || !m) return; const v = y * 10000 + m * 100 + (d || 0); if (!best || v > best.v) best = { y, m, v }; };
+    for (const x of text.matchAll(new RegExp(`${MONTH_RE}\\s+(\\d{1,2}),?\\s+(20\\d\\d)`, 'gi'))) consider(Number(x[3]), monthOf(x[1]), Number(x[2]));
+    for (const x of text.matchAll(new RegExp(`(\\d{1,2})(?:er)?\\s+${MONTH_RE}\\s+(20\\d\\d)`, 'gi'))) consider(Number(x[3]), monthOf(x[2]), Number(x[1]));
+    for (const x of text.matchAll(/\b(20\d\d)-(\d{2})-(\d{2})\b/g)) consider(Number(x[1]), Number(x[2]), Number(x[3]));
+    return best;
+  }
+
+  /**
+   * Turns the lines of a statement into transactions { date, description, amount } (amount < 0: money out).
+   * Works with the usual layouts: date, description, then one amount column (cards) or
+   * withdrawals / deposits / balance columns (bank accounts), the columns found from their headings.
+   */
+  function statementTransactions(pages) {
+    const all = pages.flat();
+    const end = periodEnd(all.slice(0, 80).map((l) => l.text).join('\n')) || periodEnd(all.map((l) => l.text).join('\n'));
+    const pad = (n) => String(n).padStart(2, '0');
+    const out = [];
+    let cols = null; // { out, in, bal }: x centers of the amount columns
+    let lastDate = null, pending = '', prev = null;
+    const center = (it) => (it.x + it.end) / 2;
+    const amountAtEnd = (l) => !!l && l.items.length > 1 && AMOUNT.test(l.items[l.items.length - 1].str.trim());
+    for (let li = 0; li < all.length; li++) {
+      const line = all[li];
+      const t = fold(line.text);
+      // Column headings of a bank account (repeated on each page).
+      const head = (re) => { const it = line.items.find((i) => re.test(fold(i.str))); return it ? center(it) : null; };
+      const wOut = head(/withdrawal|retrait|debit|paiements? et retraits|cheques? (?:&|et) debits/), wIn = head(/deposit|depot|credit/), wBal = head(/^balance|^solde/);
+      if (wOut !== null && wIn !== null) { cols = { out: wOut, in: wIn, bal: wBal }; pending = ''; continue; }
+      if (SKIP.test(t)) { pending = ''; prev = null; continue; }
+      // Amounts at the end of the line.
+      const items = line.items.slice();
+      const amounts = [];
+      while (items.length && AMOUNT.test(items[items.length - 1].str.trim())) amounts.unshift(items.pop());
+      let text = items.map((i) => i.str).join(' ').replace(/\s+/g, ' ').replace(/\s\$$/, '').trim();
+      // Date at the start (one or two dates: transaction and posting).
+      let date = null;
+      const dm = DATE_START.exec(text);
+      const nm = NUM_DATE.exec(text);
+      if (dm) {
+        const d = Number(dm[1] || dm[4]), m = monthOf(dm[2] || dm[3]);
+        let y = dm[5] ? Number(dm[5]) : end ? end.y : new Date().getFullYear();
+        if (!dm[5] && end && m > end.m) y -= 1;
+        if (m && d >= 1 && d <= 31) date = `${y}-${pad(m)}-${pad(d)}`;
+        text = text.slice(dm[0].length).trim();
+        const second = DATE_START.exec(text);
+        if (second && !second[5]) text = text.slice(second[0].length).trim();
+      } else if (nm) {
+        date = nm[1] ? `${nm[1]}-${nm[2]}-${nm[3]}` : `${nm[6].length === 2 ? '20' + nm[6] : nm[6]}-${pad(nm[4])}-${pad(nm[5])}`;
+        text = text.slice(nm[0].length).trim();
+      }
+      if (!amounts.length) {
+        if (!lastDate && !date) continue;
+        if (text.length > 80) continue;
+        const next = all[li + 1];
+        // A line with only words: the start of the next transaction when that one follows right away
+        // without its own date, otherwise the end of the previous description.
+        if (date) { lastDate = date; pending = text; prev = null; }
+        else if (prev && !(amountAtEnd(next) && !DATE_START.test(next.text) && !NUM_DATE.test(next.text))) prev.description = (prev.description + ' ' + text).trim();
+        else pending = (pending + ' ' + text).trim();
+        continue;
+      }
+      if (!date && !lastDate) continue;
+      if (date) lastDate = date;
+      const description = (pending + ' ' + text).replace(/\s+/g, ' ').trim();
+      pending = '';
+      if (!description) continue;
+      let amount = null;
+      if (cols) {
+        // Bank account: pick the amount in the withdrawals or deposits column; ignore the balance.
+        for (const a of amounts) {
+          const c = center(a);
+          const dist = (x) => (x === null || x === undefined ? Infinity : Math.abs(c - x));
+          const near = Math.min(dist(cols.out), dist(cols.in), dist(cols.bal));
+          const v = Math.abs(parseAmount(a.str.replace(/CR$/i, '')) || 0);
+          if (!v || near === dist(cols.bal)) continue;
+          amount = near === dist(cols.out) ? -v : v;
+          break;
+        }
+        if (amount === null && amounts.length >= 2) amount = -Math.abs(parseAmount(amounts[0].str) || 0) || null;
+      } else {
+        // Card: one amount; credits are negative or marked CR.
+        const raw = amounts[0].str.trim();
+        const v = parseAmount(raw.replace(/CR$/i, ''));
+        if (v === null) continue;
+        amount = v < 0 || /CR$/i.test(raw) ? Math.abs(v) : -Math.abs(v);
+      }
+      if (!amount) continue;
+      prev = { date: lastDate, description, amount };
+      out.push(prev);
+    }
+    return out;
+  }
+
+  /** PDF statement → rows in the same shape as a CSV file: [['Date', 'Description', 'Montant'], ...]. */
+  async function readPdfStatement(buffer) {
+    const pages = await readPdfText(buffer);
+    const tx = statementTransactions(pages);
+    return { rows: [['Date', 'Description', 'Montant'], ...tx.map((t) => [t.date, t.description, String(t.amount)])], count: tx.length, hasText: pages.some((p) => p.length > 3) };
+  }
+
   const api = {
     parseCSV, detectColumns, parseAmount, dateParserFor, toTransactions, guessExpensesPositive, merchantKey, suggestCategory, analyze,
-    unzip, readXlsx, parseSheetXml, writeXlsx, sheetsCsvUrl, detectHoldingColumns, findHeaderRow, mapAccount, mapMarket, splitSymbol, toHoldings, holdingIdentity, holdingKey, planSync,
+    readPdfText, statementTransactions, readPdfStatement, unzip, readXlsx, parseSheetXml, writeXlsx, sheetsCsvUrl, detectHoldingColumns, findHeaderRow, mapAccount, mapMarket, splitSymbol, toHoldings, holdingIdentity, holdingKey, planSync,
   };
   root.Importer = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
