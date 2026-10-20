@@ -189,6 +189,7 @@ alter table public.holdings add column if not exists child_id uuid references pu
 alter table public.holdings add column if not exists project_id uuid references public.projects (id) on delete set null;
 alter table public.budget_items add column if not exists nature text not null default 'fixed';
 alter table public.budget_items add column if not exists child_id uuid references public.children (id) on delete set null;
+alter table public.budget_items add column if not exists gross boolean not null default false;
 alter table public.debts add column if not exists start_date date;
 alter table public.debts add column if not exists amortization_years numeric;
 alter table public.debts add column if not exists term_start date;

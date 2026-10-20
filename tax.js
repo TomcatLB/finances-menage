@@ -126,6 +126,16 @@
     };
   }
 
+  /**
+   * After-tax income of one person from gross amounts only: { employment, selfEmployed, other } per year.
+   * Used by the Budget for income entered before tax; other income and deductions (REER…) are not counted.
+   */
+  function netIncome(inc, P = PARAMS) {
+    const gross = max0(inc.employment || 0) + (inc.selfEmployed || 0) + (inc.other || 0);
+    const t = personalTax(inc, P);
+    return { gross, tax: t.total, net: gross - t.total, rate: gross > 0 ? t.total / gross : 0 };
+  }
+
   function fssIndividual(base, P) {
     const f = P.fss.individual;
     if (base <= f.start) return 0;
@@ -214,7 +224,7 @@
     return out;
   }
 
-  const api = { PARAMS, bracketTax, qppContrib, fssIndividual, personalTax, extraTax, employerCosts, corpTax, companyYear, payoutScenarios };
+  const api = { PARAMS, bracketTax, qppContrib, fssIndividual, personalTax, netIncome, extraTax, employerCosts, corpTax, companyYear, payoutScenarios };
   root.Tax = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);
