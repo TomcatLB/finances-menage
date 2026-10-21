@@ -507,6 +507,8 @@
         actions && actions.length ? h('div', { class: 'actions' }, actions) : null),
       body);
   }
+  // A form window closes only through its buttons: a click beside it or the Escape key would lose what was typed.
+  const closeX = (fn) => h('button', { class: 'sheet-x', type: 'button', text: '×', title: 'Close without saving', 'aria-label': 'Close without saving', onclick: fn });
   const addBtn = (label, fn) => h('button', { class: 'btn primary', type: 'button', onclick: fn, text: label });
   /** The small × that deletes a row or a card at once (Undo brings it back). */
   const xBtn = (table, row, what) => h('button', {
@@ -1827,8 +1829,7 @@
       }));
     }
 
-    function close() { sheet.hidden = true; sheet.replaceChildren(); document.removeEventListener('keydown', onKey); }
-    function onKey(e) { if (e.key === 'Escape') close(); }
+    function close() { sheet.hidden = true; sheet.replaceChildren(); }
 
     const saveBtn = h('button', { class: 'btn primary', type: 'submit', text: 'Save' });
     let delBtn = null;
@@ -1888,13 +1889,11 @@
     }
 
     drawFields();
-    panel.append(h('h2', { text: title }), fieldsBox, errorBox,
+    panel.append(closeX(close), h('h2', { text: title }), fieldsBox, errorBox,
       h('div', { class: 'sheet-actions' }, delBtn,
         h('div', { class: 'right' }, h('button', { class: 'btn ghost', type: 'button', onclick: close, text: 'Cancel' }), saveBtn)));
     sheet.replaceChildren(panel);
     sheet.hidden = false;
-    sheet.onclick = (e) => { if (e.target === sheet) close(); };
-    document.addEventListener('keydown', onKey);
     const first = panel.querySelector('input, select');
     if (first) first.focus();
   }
@@ -2151,8 +2150,7 @@
     const sheet = $('#sheet');
     const panel = h('div', { class: 'sheet-panel wide', role: 'dialog', 'aria-label': 'Import statements' });
     const st = { files: [], owner: S.who === 'all' ? 'joint' : S.who, flip: {}, showOneoff: false, result: null, picks: new Map() };
-    const close = () => { sheet.hidden = true; sheet.replaceChildren(); document.removeEventListener('keydown', onKey); };
-    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    const close = () => { sheet.hidden = true; sheet.replaceChildren(); };
 
     function analyzeAll() {
       const seen = new Set();
@@ -2301,15 +2299,13 @@
         addBtnEl.disabled = !n;
       }
       updateCount();
-      panel.replaceChildren(...top, ...body, err,
+      panel.replaceChildren(closeX(close), ...top, ...body, err,
         h('div', { class: 'sheet-actions' }, h('div', { class: 'right' }, h('button', { class: 'btn ghost', type: 'button', onclick: close, text: 'Close' }), addBtnEl)));
     }
 
     draw();
     sheet.replaceChildren(panel);
     sheet.hidden = false;
-    sheet.onclick = (e) => { if (e.target === sheet) close(); };
-    document.addEventListener('keydown', onKey);
   }
 
   // --- Portfolio import: Excel, CSV or a Google Sheets link -------------------
@@ -2356,8 +2352,7 @@
       account: priv ? 'Non enregistré' : 'CELI', market: 'TSX', date: todayISO(), dateSrc: '', savedDate: null, freq: 'quarterly',
       candidates: [], plan: null, picks: new Map(), remove: new Set(),
     };
-    const close = () => { sheet.hidden = true; sheet.replaceChildren(); document.removeEventListener('keydown', onKey); };
-    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    const close = () => { sheet.hidden = true; sheet.replaceChildren(); };
     const rows = () => (st.sheets[st.sheetIdx] ? st.sheets[st.sheetIdx].rows : []);
 
     function useSheet(i) {
@@ -2602,15 +2597,13 @@
         else if (!missingRequired) parts.push(h('div', { class: 'banner', text: 'No investments recognized in this sheet. Check the row with the column titles above.' }));
       }
       updateCount();
-      panel.replaceChildren(...parts, err,
+      panel.replaceChildren(closeX(close), ...parts, err,
         h('div', { class: 'sheet-actions' }, h('div', { class: 'right' }, h('button', { class: 'btn ghost', type: 'button', onclick: close, text: 'Close' }), applyBtn)));
     }
 
     draw();
     sheet.replaceChildren(panel);
     sheet.hidden = false;
-    sheet.onclick = (e) => { if (e.target === sheet) close(); };
-    document.addEventListener('keydown', onKey);
     if (st.link) loadLink();
   }
 
