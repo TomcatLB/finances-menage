@@ -467,6 +467,7 @@
       compagnies: renderCompagnies, projections: renderProjections }[S.tab]();
     const notice = S.outdated ? h('div', { class: 'banner' },
       'New features to turn on: in Supabase, open SQL Editor, paste the supabase/schema.sql file (with your two emails) and click Run. Your data stays as it is.') : null;
+    makeSortable(panel);
     app.replaceChildren(header(), summary(), notice || '', tabs(), panel);
   }
 
@@ -961,7 +962,7 @@
     const rows = S.assets.filter((a) => sh(a.owner)).map((a) =>
       h('tr', { class: 'click', tabindex: '0', onclick: () => openAsset(a), onkeydown: (e) => { if (e.key === 'Enter') openAsset(a); } },
         h('td', null, a.name, h('span', { class: 'sub', text: `${L(a.kind)} · ${ownerName(a.owner)}${sh(a.owner) < 1 ? ' (50%)' : ''}` })),
-        h('td', { class: 'r hide-sm', text: fmtDate(a.as_of) }),
+        h('td', { class: 'r hide-sm', 'data-sort': a.as_of || '', text: fmtDate(a.as_of) }),
         h('td', { class: 'r', text: money(num(a.value) * sh(a.owner)) }),
         xCell('assets', a, a.name)));
     root.append(card('Other assets', 'House, bank accounts, vehicles… Update the value from time to time.', [addBtn('Add an asset', () => openAsset())],
@@ -1116,6 +1117,62 @@
 
   // --- Budget -----------------------------------------------------------------
   const clickRow = (fn, ...cells) => h('tr', { class: 'click', tabindex: '0', onclick: fn, onkeydown: (e) => { if (e.key === 'Enter') fn(); } }, cells);
+
+  // --- Sortable tables ----------------------------------------------------------
+  // Click a column title to sort the rows, like in a spreadsheet: first click A→Z (text) or largest first (amounts),
+  // second click the other way, third click back to the usual order. The choice is remembered per table.
+  /** What a cell sorts by: its data-sort value, else its own text without the small grey line and badges. */
+  function sortValue(td) {
+    if (!td) return null;
+    if (td.dataset.sort !== undefined) return td.dataset.sort === '' ? null : (Number.isFinite(Number(td.dataset.sort)) ? Number(td.dataset.sort) : td.dataset.sort);
+    let t = '';
+    for (const n of td.childNodes) if (!(n.nodeType === 1 && (n.classList.contains('sub') || n.classList.contains('pill')))) t += n.textContent;
+    t = t.trim();
+    if (!t || t === '—') return null;
+    const c = t.replace(/[\s  ,$%]|US|CA/g, '').replace(/−/g, '-');
+    return /^[-+]?\d*\.?\d+$/.test(c) ? Number(c) : t;
+  }
+  function makeSortable(root) {
+    root.querySelectorAll('table').forEach((table) => {
+      const ths = table.tHead ? [...table.tHead.rows[0].cells] : [];
+      const body = table.tBodies[0];
+      if (!ths.length || !body || body.rows.length < 2) return;
+      const key = 'sort.' + S.tab + ':' + ths.map((th) => th.textContent).join('|');
+      const original = [...body.rows];
+      const apply = (col, dir) => {
+        ths.forEach((th, i) => th.setAttribute('aria-sort', i === col ? (dir > 0 ? 'ascending' : 'descending') : 'none'));
+        if (col < 0) return body.append(...original);
+        const keyed = original.map((tr, i) => ({ tr, i, v: sortValue(tr.cells[col]) }));
+        keyed.sort((a, b) => {
+          if (a.v === null || b.v === null) return (a.v === null) - (b.v === null) || a.i - b.i; // empty cells always last
+          const r = typeof a.v === 'number' && typeof b.v === 'number' ? a.v - b.v
+            : String(a.v).localeCompare(String(b.v), 'en', { numeric: true, sensitivity: 'base' });
+          return r * dir || a.i - b.i;
+        });
+        body.append(...keyed.map((k) => k.tr));
+      };
+      const [sc, sd] = storeGet(key, '').split(':').map(Number);
+      ths.forEach((th, col) => {
+        if (!th.textContent.trim()) return;
+        th.classList.add('sortable');
+        th.tabIndex = 0;
+        th.title = 'Sort by this column';
+        const click = () => {
+          const cur = th.getAttribute('aria-sort');
+          // Amounts start with the largest, text with A.
+          const numeric = original.some((tr) => typeof sortValue(tr.cells[col]) === 'number');
+          const first = numeric ? -1 : 1;
+          let dir = cur === 'none' ? first : (cur === 'ascending') === (first > 0) ? -first : 0;
+          if (!dir) { apply(-1, 0); storeSet(key, ''); return; }
+          apply(col, dir);
+          storeSet(key, `${col}:${dir}`);
+        };
+        th.addEventListener('click', click);
+        th.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); click(); } });
+      });
+      if (ths[sc] && (sd === 1 || sd === -1)) apply(sc, sd); else apply(-1, 0);
+    });
+  }
   const ownerNote = (o, f) => ownerName(o) + (f < 1 ? ' (50%)' : '');
   const childName = (id) => (S.children.find((c) => c.id === id) || {}).name;
   const monthLabel = (m) => new Intl.DateTimeFormat('en-CA', { month: 'long', year: 'numeric' }).format(new Date(m + '-15T12:00:00'));
@@ -1217,7 +1274,9 @@
         : h('p', { class: 'footnote', text: 'Create envelopes (e.g. Travel $300 / month) then note expenses as they happen.' }),
       h('h3', { class: 'subhead', text: `Expenses noted in ${monthLabel(S.month)}` + (monthTotal ? ` · ${money(monthTotal)}` : '') }),
       entries.length
-        ? h('div', { class: 'table-wrap' }, h('table', null, h('tbody', null, entries)))
+        ? h('div', { class: 'table-wrap' }, h('table', null,
+          h('thead', null, h('tr', null, h('th', { text: 'Expense' }), h('th', { class: 'r', text: 'Amount' }), xHead())),
+          h('tbody', null, entries)))
         : h('p', { class: 'footnote', text: 'Nothing noted this month.' }),
       childSpent ? h('p', { class: 'footnote', text: `Includes ${money(childSpent)} of children’s expenses (details in the Children tab).` }) : null);
   }

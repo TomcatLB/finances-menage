@@ -187,6 +187,11 @@ th {
 td { padding: 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
 tr:last-child td { border-bottom: 0; }
 th.r, td.r { text-align: right; }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover, th.sortable:focus-visible { color: var(--fg); }
+th.sortable::after { content: '↕'; display: inline-block; margin-left: 4px; opacity: .35; font-weight: 400; }
+th.sortable[aria-sort="ascending"]::after { content: '▲'; opacity: 1; color: var(--accent); }
+th.sortable[aria-sort="descending"]::after { content: '▼'; opacity: 1; color: var(--accent); }
 tbody tr.click { cursor: pointer; }
 tbody tr.click:hover td { background: var(--surface-2); }
 td .sub { display: block; color: var(--muted); font-size: var(--fs-caption); }
