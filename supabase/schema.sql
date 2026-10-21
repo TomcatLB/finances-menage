@@ -205,7 +205,48 @@ create table if not exists public.business_expenses (
   updated_at timestamptz not null default now()
 );
 
+-- Buys and sells of investments; a sell keeps its realized gain (from the average cost at that time).
+create table if not exists public.transactions (
+  id uuid primary key default gen_random_uuid(),
+  holding_id uuid references public.holdings (id) on delete set null,
+  symbol text not null,
+  market text,
+  currency text not null default 'CAD',
+  account text,
+  owner text not null default 'joint' check (owner in ('p1', 'p2', 'joint')),
+  kind text not null check (kind in ('buy', 'sell')),
+  trade_date date not null default current_date,
+  qty numeric not null check (qty > 0),
+  price numeric not null check (price >= 0),
+  fees numeric not null default 0 check (fees >= 0),
+  fx_rate numeric,                 -- USD/CAD on the trade date (USD securities)
+  acb_per_unit numeric,            -- sells: average cost per unit in CAD
+  realized_gain numeric,           -- sells: gain or loss in CAD
+  note text,
+  created_at timestamptz not null default now()
+);
+
+-- TFSA (CELI) and RRSP (REER) room per person and year: 'room' from the notice of assessment, then contributions and withdrawals.
+create table if not exists public.contributions (
+  id uuid primary key default gen_random_uuid(),
+  owner text not null check (owner in ('p1', 'p2')),
+  plan text not null check (plan in ('CELI', 'REER')),
+  kind text not null check (kind in ('room', 'contribution', 'withdrawal')),
+  year int not null,
+  amount numeric not null check (amount >= 0),
+  entry_date date not null default current_date,
+  note text,
+  created_at timestamptz not null default now()
+);
+
 -- Columns added after the first version (safe on a fresh or existing database).
+alter table public.settings add column if not exists allocation_targets jsonb;
+alter table public.settings add column if not exists projection jsonb not null default '{}'::jsonb;
+alter table public.settings add column if not exists tax jsonb not null default '{}'::jsonb;
+alter table public.settings add column if not exists public_sheet_url text;
+alter table public.settings add column if not exists private_sheet_url text;
+alter table public.holdings add column if not exists update_freq text;      -- private holdings: 'monthly' or 'quarterly' reminder
+alter table public.holdings add column if not exists asset_class text;      -- overrides the automatic allocation class
 alter table public.holdings add column if not exists child_id uuid references public.children (id) on delete set null;
 alter table public.holdings add column if not exists project_id uuid references public.projects (id) on delete set null;
 -- CRYPTO (BTC, ETH…): priced every weekday in USD by the daily job.
@@ -258,7 +299,8 @@ do $$
 declare t text;
 begin
   foreach t in array array['settings', 'holdings', 'prices', 'assets', 'debts', 'budget_items', 'snapshots',
-                           'children', 'resp_entries', 'projects', 'expense_log', 'business_expenses'] loop
+                           'children', 'resp_entries', 'projects', 'expense_log', 'business_expenses',
+                           'transactions', 'contributions'] loop
     execute format('alter table public.%I enable row level security', t);
     execute format('revoke all on public.%I from anon', t);
     execute format('grant select, insert, update, delete on public.%I to authenticated', t);

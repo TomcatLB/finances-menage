@@ -97,7 +97,7 @@ In RBC Online Banking, open the account or credit card, choose the period, then 
 - **REEE grants.** The app uses the basic 2025 rules: SCEE 20 % (up to $500 a year, $1,000 with carry-forward, $7,200 lifetime) and IQEE 10 % (up to $250 a year, $500 with carry-forward, $3,600 lifetime), until the year the child turns 17. The income-tested extras (additional SCEE, IQEE supplement, Canada Learning Bond) aren't computed. Check the amounts each year on canada.ca and revenuquebec.ca.
 - **Estimates, not statements.** Debt figures assume a constant rate. Fixed-rate Canadian mortgages are computed with semi-annual compounding, as the Interest Act requires lenders to quote them; variable mortgages and other loans use monthly compounding. The lender's statement is always the authority. USD holdings' cost is converted at today's rate, which is not the adjusted cost base used for taxes.
 - **Forgotten password.** Reset it in Supabase: **Authentication → Users → … → Send password recovery**, or set a new one there.
-- **Backups.** Supabase's free plan doesn't include downloadable backups. Click **Exporter** at the top of the app now and then: it downloads everything as one Excel file.
+- **Backups.** Supabase's free plan keeps no backups, so the **Back up the database** action saves every table each night (CSV files in one password-protected `.7z` file, kept 90 days). To turn it on: make up a long password, keep it in your password manager (GitHub never shows a secret again), and add it in **Settings → Secrets and variables → Actions → New repository secret**, name `BACKUP_PASSWORD`. It also needs `SUPABASE_DB_URL` (step 1.4). To get a backup: **Actions → Back up the database →** the latest run **→ Artifacts**; open the file with 7-Zip (Windows) or Keka (Mac) and that password. **Export** at the top of the app still downloads everything as one Excel file.
 - **Reminders by email.** After the price update, the daily job opens a GitHub issue named *Rappels* when a private investment needs a new value, a mortgage term ends within 120 days, or the RRSP deadline is near; GitHub emails the repository owner. Make sure you *Watch* the repository (it's the default for your own repos) and that GitHub has your email.
 - **Tax figures** are 2026 estimates for Québec (sources in `docs/taux-2026.md`). They leave out refundable and family credits, capital cost allowance, the AMT and corporate investment income. Check with your accountant before deciding.
 
@@ -118,6 +118,7 @@ scripts/update_prices.py         the daily price job (run by GitHub Actions)
 scripts/reminders.py             the daily reminders (GitHub issue, emailed by GitHub)
 docs/taux-2026.md                the tax and benefit figures, with sources
 .github/workflows/prices.yml     its schedule
+.github/workflows/backup.yml     the nightly backup (password-protected, kept 90 days)
 tests/                           checks that the page and the job compute the same numbers
 ```
 
