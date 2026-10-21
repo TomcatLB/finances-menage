@@ -18,6 +18,8 @@ class YahooSymbols(unittest.TestCase):
         self.assertEqual(up.yahoo_symbol("NEO", "ABC"), "ABC.NE")
         self.assertEqual(up.yahoo_symbol("US", "BRK.B"), "BRK-B")
         self.assertEqual(up.yahoo_symbol("CRYPTO", "btc"), "BTC-USD")
+        self.assertEqual(up.yahoo_symbol("TSX", "VEE.TO"), "VEE.TO")
+        self.assertEqual(up.yahoo_symbol("TSXV", "pclo.v"), "PCLO.V")
 
 
 class LastCloses(unittest.TestCase):
@@ -30,6 +32,10 @@ class LastCloses(unittest.TestCase):
     def test_during_session_drops_today(self):
         now = dt.datetime(2026, 10, 15, 11, 0, tzinfo=ET)
         self.assertEqual(up.last_closes(self.rows, now), (46.0, 45.0, dt.date(2026, 10, 14)))
+
+    def test_intraday_keeps_today(self):
+        now = dt.datetime(2026, 10, 15, 11, 0, tzinfo=ET)
+        self.assertEqual(up.last_closes(self.rows, now, intraday=True), (47.0, 46.0, dt.date(2026, 10, 15)))
 
     def test_holiday_keeps_last_session(self):
         now = dt.datetime(2026, 10, 16, 18, 30, tzinfo=ET)

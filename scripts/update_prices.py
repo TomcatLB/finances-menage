@@ -6,9 +6,14 @@
 3. Writes them to the `prices` table.
 4. Writes today's net-worth snapshot to `snapshots` (same formula as calc.js).
 
+With PRICE_MODE=intraday (every 30 minutes while markets are open) it keeps the
+price of the session in progress and skips the snapshot: the evening run writes
+the close and the day's snapshot.
+
 Environment:
   SUPABASE_URL          https://<project>.supabase.co
   SUPABASE_SERVICE_KEY  the project's secret key (sb_secret_…) or legacy service_role key
+  PRICE_MODE            "intraday" for the runs during the session; anything else is the evening run
 """
 from __future__ import annotations
 
@@ -64,14 +69,18 @@ def _check(r: requests.Response, what: str) -> None:
 # ----------------------------------------------------------------------------
 def yahoo_symbol(market: str, symbol: str) -> str:
     """XEQT on TSX -> XEQT.TO; class shares use a dash on Yahoo: BAM.A -> BAM-A.TO, BRK.B -> BRK-B; BTC -> BTC-USD."""
-    return symbol.strip().upper().replace(".", "-") + AUTO_SUFFIX[market]
+    s, suffix = symbol.strip().upper(), AUTO_SUFFIX[market]
+    if suffix.startswith(".") and s.endswith(suffix):
+        s = s[: -len(suffix)]  # typed with Yahoo's own suffix: VEE.TO on TSX
+    return s.replace(".", "-") + suffix
 
 
-def last_closes(closes, now_et: dt.datetime):
+def last_closes(closes, now_et: dt.datetime, intraday: bool = False):
     """closes: list of (date, close) sorted by date, NaNs removed.
-    Returns (close, prev_close, date) of the last *completed* session, or None."""
+    Returns (close, prev_close, date) of the last *completed* session, or None.
+    intraday=True keeps today's bar: its "close" is the latest trade."""
     rows = list(closes)
-    if rows and rows[-1][0] == now_et.date() and now_et.time() < MARKET_CLOSE_BUFFER:
+    if not intraday and rows and rows[-1][0] == now_et.date() and now_et.time() < MARKET_CLOSE_BUFFER:
         rows = rows[:-1]  # today's bar is still moving
     if not rows:
         return None
@@ -80,7 +89,7 @@ def last_closes(closes, now_et: dt.datetime):
     return close, prev, close_date
 
 
-def fetch_yahoo(ysym: str, now_et: dt.datetime):
+def fetch_yahoo(ysym: str, now_et: dt.datetime, intraday: bool = False):
     import yfinance as yf
 
     # auto_adjust=False: the plain closing price, not one adjusted for dividends.
@@ -93,7 +102,7 @@ def fetch_yahoo(ysym: str, now_et: dt.datetime):
         if math.isfinite(v) and v > 0:
             rows.append((ts.date(), v))
     rows.sort()
-    return last_closes(rows, now_et)
+    return last_closes(rows, now_et, intraday)
 
 
 def fetch_usdcad():
@@ -200,6 +209,7 @@ def main() -> int:
         print("::error::Add SUPABASE_URL and SUPABASE_SERVICE_KEY as repository secrets.")
         return 1
     db = Supabase(url, key)
+    intraday = os.environ.get("PRICE_MODE", "").strip().lower() == "intraday"
     now_et = dt.datetime.now(TORONTO)
     now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
 
@@ -216,7 +226,7 @@ def main() -> int:
     for key_, (market, symbol) in sorted(wanted.items()):
         ysym = yahoo_symbol(market, symbol)
         try:
-            got = fetch_yahoo(ysym, now_et)
+            got = fetch_yahoo(ysym, now_et, intraday)
         except Exception as exc:  # network or parsing problem for one symbol
             got = None
             print(f"  {ysym}: error {exc!r}")
@@ -235,7 +245,7 @@ def main() -> int:
             "prev_close": prev,
             "currency": "USD" if market in USD_MARKETS else "CAD",
             "price_date": close_date.isoformat(),
-            "source": "Yahoo Finance (yfinance)",
+            "source": "Yahoo Finance (intraday)" if intraday else "Yahoo Finance (yfinance)",
             "fetched_at": now_iso,
         })
         print(f"  {ysym}: {close} on {close_date}")
@@ -260,6 +270,14 @@ def main() -> int:
         failures.append("FX:USDCAD (Bank of Canada)")
 
     db.upsert("prices", rows, "symbol_key")
+
+    if intraday:
+        # The net-worth chart keeps one point per day, at the close: the evening run writes it.
+        for w in warnings:
+            print(f"::warning::{w}")
+        if failures:
+            print("::warning::No price found for: " + ", ".join(failures))
+        return 0
 
     # Snapshot, dated by the most recent market close we have.
     prices = {p["symbol_key"]: p for p in db.get("prices")}

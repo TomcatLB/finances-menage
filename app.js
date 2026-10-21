@@ -128,6 +128,12 @@
     return new Intl.DateTimeFormat('en-CA', opts || { day: 'numeric', month: 'short', year: 'numeric' }).format(d);
   }
   const todayISO = () => new Date().toLocaleDateString('en-CA');
+  // Time of today's latest price taken during the session (the 30-minute update), or null once the evening close is in.
+  function liveTime() {
+    const at = Object.values(S.prices).filter((p) => /intraday/i.test(p.source || '') && p.price_date === todayISO())
+      .map((p) => p.fetched_at).filter(Boolean).sort().at(-1);
+    return at ? new Date(at).toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' }) : null;
+  }
   const cls = (v) => (v > 0.005 ? 'up' : v < -0.005 ? 'down' : '');
   const ownerName = (o) => (o === 'p1' ? S.settings.p1_name : o === 'p2' ? S.settings.p2_name : 'Joint');
   const sh = (owner) => C.share(owner, S.who);
@@ -459,13 +465,15 @@
     const p = S.loaded ? portfolio() : null;
     const fx = S.prices['FX:USDCAD'];
     const parts = [];
-    if (p && p.lastClose) parts.push(`Closing prices of ${fmtDate(p.lastClose)}`);
+    const live = p ? liveTime() : null;
+    if (live) parts.push(`Prices at ${live}`);
+    else if (p && p.lastClose) parts.push(`Closing prices of ${fmtDate(p.lastClose)}`);
     if (fx) parts.push(`USD/CAD ${fmtFx.format(num(fx.close))} (Bank of Canada, ${fmtDate(fx.price_date, { day: 'numeric', month: 'short' })})`);
     const who = h('div', { class: 'seg', role: 'group', 'aria-label': 'Show for' },
       [['all', 'Household'], ['p1', S.settings.p1_name], ['p2', S.settings.p2_name]].map(([k, label]) =>
         h('button', { type: 'button', 'aria-pressed': String(S.who === k), onclick: () => { S.who = k; storeSet('who', k); render(); }, text: label })));
     return h('header', { class: 'top' },
-      h('div', null, h('h1', { text: 'Household finances' }), h('p', { class: 'sub', text: parts.join(' · ') || 'Prices update every trading evening.' })),
+      h('div', null, h('h1', { text: 'Household finances' }), h('p', { class: 'sub', text: parts.join(' · ') || 'Prices update every 30 minutes while markets are open.' })),
       h('div', { class: 'top-actions' },
         S.loaded && !S.denied && !S.loadError ? who : null,
         S.loaded && !S.denied && !S.loadError ? h('button', {
@@ -552,7 +560,8 @@
     if (due.length) banners.push(`${due.length} private investment(s) to update: ${due.map((hd) => hd.name || hd.symbol).join(', ').replace(/\.$/, '')}.`);
     for (const b of banners) root.append(h('div', { class: 'banner', text: b }));
 
-    root.append(card('Performance', p.lastClose ? `At the closing price of ${fmtDate(p.lastClose)}` : 'Current values', null,
+    const live = liveTime();
+    root.append(card('Performance', live ? `At the prices of ${live} today` : p.lastClose ? `At the closing price of ${fmtDate(p.lastClose)}` : 'Current values', null,
       h('div', { class: 'kpis' },
         kpi('Market value', money(p.mv)),
         kpi('Total cost', money(p.cost)),
@@ -620,7 +629,7 @@
         ...holdingCells(r, priceNote), xCell('holdings', hd, hd.market === 'CASH' ? `cash · ${L(hd.account)}` : hd.symbol.toUpperCase()));
     });
     const pubLink = !!S.settings.public_sheet_url;
-    root.append(card('Public investments', pub.length ? `${pub.length} position(s) · ${money(sum(pub))} · closing prices updated every trading evening` : 'Stocks, ETFs and cash: the price updates every trading evening.',
+    root.append(card('Public investments', pub.length ? `${pub.length} position(s) · ${money(sum(pub))} · prices updated every 30 minutes while markets are open` : 'Stocks, ETFs and cash: the price updates every 30 minutes while markets are open.',
       [h('button', { class: 'btn', type: 'button', onclick: () => openHoldingsImport('public'), text: pubLink ? 'Update (Google Sheets)' : 'Import' }),
         addBtn('Add an investment', () => openHolding())],
       pub.length ? h('div', { class: 'table-wrap' }, h('table', null,

@@ -6,7 +6,7 @@ Ce guide est pour vous deux. Comptez **30 à 45 minutes**, une seule fois, sur u
 
 - Les deux adresses courriel avec lesquelles vous allez vous connecter.
 - Un compte **Supabase** (gratuit) : c'est la base de données, là où vos chiffres sont gardés.
-- Un compte **GitHub** (gratuit) : c'est ce qui héberge la page web et met à jour les prix de la bourse chaque soir.
+- Un compte **GitHub** (gratuit) : c'est ce qui héberge la page web et met à jour les prix de la bourse aux 30 minutes pendant la séance, et chaque soir à la fermeture.
 
 Les deux comptes sont **à vous**. Personne d'autre (y compris la personne qui vous a envoyé l'app) n'a accès à vos données.
 
@@ -91,12 +91,12 @@ Ces deux valeurs sont faites pour être publiques; ce sont les règles d'accès 
 3. Ouvrez l'onglet **Actions**. Si GitHub le demande, cliquez **I understand my workflows, go ahead and enable them**.
 4. Cliquez **Update closing prices → Run workflow → Run workflow**. Une coche verte après une minute = tout fonctionne.
 
-Ensuite, ça roule tout seul du lundi au vendredi vers 18 h 30 (17 h 30 en hiver), après la fermeture des marchés.
+Ensuite, ça roule tout seul du lundi au vendredi : aux 30 minutes de 9 h 30 à 16 h 15 pour les derniers prix, puis vers 18 h 30 (17 h 30 en hiver) pour les prix de fermeture, le point du graphique de valeur nette et les rappels. GitHub démarre parfois une mise à jour en retard ou en saute une; c'est normal.
 
 ## 8. Premiers pas dans l'app
 
 - **Réglages** (en haut) : mettez vos deux prénoms.
-- **Portfolio** : deux sections. **Placements publics** (FNB, actions, encaisse) : le cours se met à jour chaque soir de bourse; symboles sans suffixe (`XEQT`, `VFV`). **Placements privés** (fonds privés, actions de votre compagnie, prêts privés…) : vous entrez la valeur, avec un rappel chaque mois ou trimestre. Le bouton **Importer** lit un fichier Excel ou CSV de votre courtier, ou un lien Google Sheets, et vous montre ce qui sera ajouté ou mis à jour avant d'enregistrer. Après vos premiers placements, relancez l'étape 7.4 pour avoir les prix tout de suite.
+- **Portfolio** : deux sections. **Placements publics** (FNB, actions, encaisse) : le cours se met à jour aux 30 minutes pendant la séance; symboles sans suffixe (`XEQT`, `VFV`). **Placements privés** (fonds privés, actions de votre compagnie, prêts privés…) : vous entrez la valeur, avec un rappel chaque mois ou trimestre. Le bouton **Importer** lit un fichier Excel ou CSV de votre courtier, ou un lien Google Sheets, et vous montre ce qui sera ajouté ou mis à jour avant d'enregistrer. Après vos premiers placements, relancez l'étape 7.4 pour avoir les prix tout de suite.
 - **Actifs** : maison, comptes bancaires, autos… avec une valeur estimée.
 - **Budget** : dépenses fixes, revenus, enveloppes. **Importer des relevés** lit les fichiers CSV de RBC (et la plupart des autres banques). Le fichier est lu dans votre navigateur et n'est jamais envoyé ailleurs.
 - Aussi dans **Portfolio** : la **répartition des actifs** (actions, obligations…) avec une cible, les **achats et ventes** (gains en capital imposables ou à l'abri), et les **droits CELI et REER** de chacun.
