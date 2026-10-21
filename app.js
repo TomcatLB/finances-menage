@@ -134,7 +134,7 @@
 
   function parseNum(raw) {
     if (raw === null || raw === undefined) return null;
-    let t = String(raw).replace(/[\s  $]/g, '');
+    let t = String(raw).replace(/[\s  $]/g, '').replace(/[−–]/g, '-');
     if (t === '') return null;
     // 1,234.56 and 1,234 use commas for thousands; a lone comma is a decimal point (4,59).
     if (t.includes('.') || /^-?\d{1,3}(,\d{3})+$/.test(t)) t = t.replace(/,/g, '');
@@ -500,6 +500,7 @@
         h('td', null,
           hd.market === 'CASH' ? h('span', { class: 'ticker', text: 'CASH' }) : h('span', { class: 'ticker', text: hd.symbol.toUpperCase() }),
           ' ', hd.currency === 'USD' ? h('span', { class: 'pill info', text: 'USD' }) : null,
+          hd.market === 'CASH' && num(hd.qty) < 0 ? h('span', { class: 'pill warn', text: 'margin' }) : null,
           h('span', { class: 'sub', text: [L(hd.name), L(hd.account), ownerName(hd.owner) + (r.f < 1 ? ' (50%)' : '')].filter(Boolean).join(' · ') })),
         ...holdingCells(r, priceNote));
     });
@@ -567,14 +568,15 @@
     const total = Object.values(totals).reduce((a, b) => a + b, 0);
     if (!(total > 0)) return '';
     const targets = S.settings.allocation_targets || null;
-    const rows = Object.entries(CLASSES).filter(([k]) => totals[k] > 0.5 || (targets && num(targets[k]) > 0)).map(([k, label]) => {
+    // Margin (negative cash) shows as a negative cash line: the other classes then add up to more than 100 %.
+    const rows = Object.entries(CLASSES).filter(([k]) => Math.abs(totals[k]) > 0.5 || (targets && num(targets[k]) > 0)).map(([k, label]) => {
       const cur = totals[k] / total;
       const tgt = targets ? num(targets[k]) / 100 : null;
       const diff = tgt === null ? null : tgt * total - totals[k];
       return h('div', { class: 'alloc-row' },
         h('div', { class: 'name', text: label }),
         h('div', { class: 'bar-track' },
-          h('div', { class: 'bar-fill', style: `width:${(cur * 100).toFixed(2)}%; background:${CLASS_COLORS[k]}` }),
+          h('div', { class: 'bar-fill', style: `width:${(Math.max(0, cur) * 100).toFixed(2)}%; background:${CLASS_COLORS[k]}` }),
           tgt !== null ? h('div', { class: 'target-mark', style: `left:${(tgt * 100).toFixed(2)}%`, title: `Target ${fmtPct.format(tgt)}` }) : null),
         h('div', { class: 'amt' }, `${fmtPct.format(cur)}`, h('small', { text: money(totals[k]) })),
         diff === null ? null : h('div', { class: 'amt ' + (Math.abs(diff) < total * 0.01 ? '' : diff > 0 ? 'up' : 'down') },
@@ -1692,7 +1694,7 @@
           input = h('input', {
             id, value: val, placeholder: f.placeholder || null, autocomplete: 'off',
             type: f.type === 'date' ? 'date' : 'text',
-            inputmode: f.type === 'num' ? 'decimal' : null,
+            inputmode: f.type === 'num' && !f.neg ? 'decimal' : null, // the decimal keypad on phones has no minus sign
             autocapitalize: f.upper ? 'characters' : null,
             spellcheck: 'false',
           });
@@ -1729,7 +1731,8 @@
         let v = state[f.k];
         if (f.type === 'num') {
           v = parseNum(v);
-          if (Number.isNaN(v) || (v !== null && v < 0)) { return invalid(f, `“${typeof f.label === 'function' ? f.label(state) : f.label}” must be a positive number.`); }
+          const neg = typeof f.neg === 'function' ? f.neg(state) : f.neg;
+          if (Number.isNaN(v) || (v !== null && v < 0 && !neg)) { return invalid(f, `“${typeof f.label === 'function' ? f.label(state) : f.label}” must be a positive number.`); }
         } else if (typeof v === 'string') {
           v = v.trim();
           if (f.upper) v = v.toUpperCase();
@@ -1793,8 +1796,9 @@
           hint: (s) => (MARKETS[s.market]?.auto ? 'No suffix: XEQT, VFV, AAPL. Class shares: BAM.A' : 'A short name to find it again') },
         { k: 'currency', label: 'Currency', type: 'select', options: { CAD: 'CAD', USD: 'USD' }, show: (s) => !MARKETS[s.market]?.cur },
         { k: 'name', label: 'Name (optional)', type: 'text', placeholder: 'iShares Core Equity ETF', wide: true },
-        { k: 'qty', label: (s) => (s.market === 'CASH' ? 'Amount' : 'Number of units'), type: 'num', req: true,
-          hint: (s) => (s.market === 'MANUAL' ? 'No units (company, loan, building): 1, then the total value as the value per unit' : '') },
+        { k: 'qty', label: (s) => (s.market === 'CASH' ? 'Amount' : 'Number of units'), type: 'num', req: true, neg: (s) => s.market === 'CASH',
+          hint: (s) => (s.market === 'MANUAL' ? 'No units (company, loan, building): 1, then the total value as the value per unit'
+            : s.market === 'CASH' ? 'Negative for a margin balance (money owed to the broker): −15 000' : '') },
         { k: 'avg_cost', label: (s) => (s.market === 'MANUAL' ? 'Amount invested per unit' : 'Average cost per unit'), type: 'num', show: (s) => s.market !== 'CASH', hint: 'In the security’s currency', clearWhenHidden: true },
         { k: 'manual_price', label: (s) => (s.market === 'MANUAL' ? 'Current value per unit' : 'Current price'), type: 'num', show: (s) => s.market === 'MANUAL', req: true, clearWhenHidden: true },
         { k: 'manual_price_date', label: 'Value as of', type: 'date', show: (s) => s.market === 'MANUAL', clearWhenHidden: true },

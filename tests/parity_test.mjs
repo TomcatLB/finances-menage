@@ -33,6 +33,21 @@ assert.ok(close(js.p1.inv, p1inv), 'p1 investments');
 assert.ok(close(js.p1.net + js.p2.net, js.all.net), 'p1 + p2 should equal the household');
 console.log('Hand-checked totals OK');
 
+// Margin: negative cash lowers investments the same way on both sides.
+{
+  const margin = { ...sample, holdings: [...sample.holdings, { symbol: 'CAD', market: 'CASH', currency: 'CAD', qty: -15000, avg_cost: null, owner: 'p1' }] };
+  const jsM = Calc.snapshotData(margin);
+  const pyM = JSON.parse(execFileSync('python3', ['-c', `
+import json, sys
+sys.path.insert(0, 'scripts')
+from update_prices import snapshot_data
+print(json.dumps(snapshot_data(json.load(sys.stdin))))
+`], { encoding: 'utf8', input: JSON.stringify(margin) }));
+  assert.deepEqual(jsM, pyM, 'margin: calc.js and update_prices.py disagree');
+  assert.ok(close(jsM.all.inv, js.all.inv - 15000) && close(jsM.p1.inv, js.p1.inv - 15000), 'margin lowers investments');
+  console.log('Margin parity OK');
+}
+
 // Debt: 400 000 $ at 5 % fixed (semi-annual), monthly payment for 25 years.
 // Standard Canadian formula gives about 2 326.42 $/month.
 const mort = { kind: 'mortgage', rate_type: 'fixed', rate: 5, freq: 'monthly', balance: 400000, payment: 2326.42 };
