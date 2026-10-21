@@ -8,7 +8,7 @@
  */
 (function () {
   'use strict';
-  const KEY = 'finances-dev-db-v1';
+  const KEY = 'finances-dev-db-v2';
   const today = new Date();
   const iso = (d) => d.toLocaleDateString('en-CA');
   const daysAgo = (n) => { const d = new Date(today); d.setDate(d.getDate() - n); return iso(d); };
@@ -59,7 +59,7 @@
       ],
       budget_items: [
         budget('Salaire – Alex', 'Salaire net', 'income', 95000, 'yearly', 'p1', { gross: true }),
-        budget('Travail autonome – Sam', 'Travail autonome', 'income', 2350, 'biweekly', 'p2'),
+        budget('Travail autonome – Sam', 'Travail autonome', 'income', 2350, 'biweekly', 'p2', { gross: true }),
         budget('Allocation famille', 'Allocations familiales', 'income', 520, 'monthly', 'joint'),
         budget('Taxes municipales', 'Logement', 'expense', 4800, 'yearly', 'joint'),
         budget('Hydro-Québec', 'Électricité et chauffage', 'expense', 140, 'monthly', 'joint'),
@@ -91,6 +91,13 @@
         row({ company_id: co.id, kind: 'income', name: 'Contrats de photo', grp: 'Ventes et honoraires', amount: 5200, freq: 'monthly', deductible_pct: 100 }),
         row({ company_id: co.id, kind: 'expense', name: 'Adobe Creative Cloud', grp: 'Logiciels et abonnements', amount: 34, freq: 'monthly', deductible_pct: 100 }),
         row({ company_id: co.id, kind: 'expense', name: 'Repas clients', grp: 'Repas et représentation', amount: 120, freq: 'monthly', deductible_pct: 50 }),
+      ],
+      business_expenses: [
+        row({ owner: 'p1', spend_date: `${today.getFullYear()}-01-15`, end_date: null, label: 'Adobe Creative Cloud', grp: 'Logiciels et abonnements', amount: 34, freq: 'monthly', deductible_pct: 100, note: null }),
+        row({ owner: 'p1', spend_date: monthsAgo(2, 10), end_date: null, label: 'Instagram ads', grp: 'Publicité et marketing', amount: 450, freq: 'once', deductible_pct: 100, note: null }),
+        row({ owner: 'p1', spend_date: monthsAgo(1, 20), end_date: null, label: 'Client cocktail', grp: 'Événements clients', amount: 820, freq: 'once', deductible_pct: 50, note: null }),
+        row({ owner: 'p2', spend_date: `${today.getFullYear()}-02-01`, end_date: null, label: 'Squarespace', grp: 'Logiciels et abonnements', amount: 23, freq: 'monthly', deductible_pct: 100, note: null }),
+        row({ owner: 'p2', spend_date: monthsAgo(3, 5), end_date: null, label: 'Lens 50 mm', grp: 'Matériel et équipement', amount: 1299, freq: 'once', deductible_pct: 100, note: null }),
       ],
       transactions: [
         row({ holding_id: holdings[0].id, symbol: 'XEQT', market: 'TSX', currency: 'CAD', account: 'CELI', owner: 'p1', kind: 'buy', trade_date: monthsAgo(2), qty: 50, price: 34.1, fees: 0, fx_rate: null, acb_per_unit: null, realized_gain: null, note: null }),
