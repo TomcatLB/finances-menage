@@ -1,6 +1,6 @@
 # Finances du ménage
 
-A private finance dashboard for a couple: **portfolio**, **net worth over time**, **budget** and **debts** (mortgage, lines of credit…), shared between two logins. Investment values update every weekday evening from the market close.
+A private finance dashboard for a couple: **portfolio**, **net worth over time**, **budget** and **debts** (mortgage, lines of credit…), shared between two logins. Investment prices update every 30 minutes while markets are open, and from the close every weekday evening.
 
 **Guide d'installation en français : [INSTALLATION.md](INSTALLATION.md).**
 
@@ -56,7 +56,7 @@ Both values are designed to be public; the access rules from step 1 are what pro
 3. Open the **Actions** tab. If GitHub asks, click **I understand my workflows, go ahead and enable them**.
 4. Click **Update closing prices → Run workflow** once to test it. After your first holdings are entered, run it again so they get prices right away.
 
-From then on it runs Monday–Friday at 22:30 UTC (18:30 in Montréal in summer, 17:30 in winter), after the 16:00 close. GitHub sometimes starts scheduled runs late; that's normal.
+From then on it runs every 30 minutes from 9:30 to 16:15 (Montréal time) on weekdays for the latest prices, and at 22:30 UTC (18:30 in Montréal in summer, 17:30 in winter) for the closing prices, the net-worth snapshot and the reminders. GitHub sometimes starts scheduled runs late or skips one when it is busy; that's normal. In a private repository each run uses about a minute of the free monthly Actions minutes (roughly 400 a month); public repositories don't count.
 
 ---
 
@@ -64,7 +64,7 @@ From then on it runs Monday–Friday at 22:30 UTC (18:30 in Montréal in summer,
 
 | Tab | What goes in |
 |---|---|
-| **Portfolio** | Two sections. **Placements publics**: each ETF or stock per account (CELI, REER, CELIAPP, REEE…), priced every weekday at the close; symbols go in **without** a suffix (`XEQT`, `VFV`, `AAPL`; class shares like `BAM.A`); cash in a brokerage account is *Encaisse*. **Placements privés**: private funds, shares of your own company, private loans, mutual funds or crypto, valued by hand, with an optional monthly or quarterly reminder. Both sections can be **imported** from an Excel file (.xlsx), a CSV or a Google Sheets link (see below). A holding can be **associated** with a child (its REEE) or a project, so it counts there automatically. Also in this tab: **asset allocation** against a target mix (with what to buy or sell), **buys and sells** with realized gains (taxable vs sheltered), and **CELI / REER room** for each person. |
+| **Portfolio** | Two sections. **Placements publics**: each ETF or stock per account (CELI, REER, CELIAPP, REEE…), priced every 30 minutes during the session and at the close; symbols go in **without** a suffix (`XEQT`, `VFV`, `AAPL`; class shares like `BAM.A`); cash in a brokerage account is *Encaisse*. **Placements privés**: private funds, shares of your own company, private loans, mutual funds or crypto, valued by hand, with an optional monthly or quarterly reminder. Both sections can be **imported** from an Excel file (.xlsx), a CSV or a Google Sheets link (see below). A holding can be **associated** with a child (its REEE) or a project, so it counts there automatically. Also in this tab: **asset allocation** against a target mix (with what to buy or sell), **buys and sells** with realized gains (taxable vs sheltered), and **CELI / REER room** for each person. |
 | **Actifs** | The house, bank accounts, vehicles… with an estimated value. The net-worth chart fills in automatically, one point per trading day. |
 | **Budget** | **Fixed expenses** (rent, Hydro, Internet, insurance…), **income** (net, or gross with an estimated after-tax amount), and **variable envelopes** (travel, shopping, outings) with a monthly amount. Ad hoc spending is noted as it happens and compared to its envelope month by month. **Importer des relevés** reads RBC CSV exports or PDF statements (2–3 months), detects what comes back every month and proposes budget lines. Debt payments come from the Debts tab (toggle at the top). |
 | **Enfants** | One card per child: recurring expenses (daycare, activities), one-off expenses (toys, clothes), and the **REEE**: contributions, SCEE and IQEE received, and how much to contribute this year to get the maximum basic grants. |
