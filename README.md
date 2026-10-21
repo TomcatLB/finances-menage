@@ -20,7 +20,8 @@ You need a free [Supabase](https://supabase.com) account and a GitHub account. M
 
 1. In Supabase, create a **new project** (any name, region *Canada (Central)* if offered, and save the database password somewhere safe).
 2. Open `supabase/schema.sql` from this repo and **replace the two example emails** near the top with the two emails you'll log in with.
-3. In Supabase, go to **SQL Editor → New query**, paste the whole file, and click **Run**. You should see "Success". Running it again is harmless, and it is how a new version of the app adds its tables: after pulling an update, run `schema.sql` again (keep your two emails in it).
+3. In Supabase, go to **SQL Editor → New query**, paste the whole file, and click **Run**. You should see "Success". Running it again is harmless, and it is how a new version of the app adds its tables. The example emails are never added, so later runs don't need your emails in the file.
+4. Optional, so you never paste it again: in Supabase click **Connect** (top of the project), choose **Session pooler**, and copy the connection string (`postgresql://postgres.xxxx:[YOUR-PASSWORD]@…pooler.supabase.com:5432/postgres`). Replace `[YOUR-PASSWORD]` with the database password from step 1. In GitHub: **Settings → Secrets and variables → Actions → New repository secret**, name `SUPABASE_DB_URL`, paste it. From then on the **Update database schema** action reruns `schema.sql` by itself each time it changes on `main` (or click **Run workflow** in the Actions tab).
 
 ### 2. Create the two logins
 

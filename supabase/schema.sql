@@ -4,8 +4,11 @@
 -- Run once: Supabase dashboard → SQL Editor → New query → paste this file → Run.
 -- Safe to run again (it skips what already exists).
 --
--- BEFORE RUNNING: replace the two example emails just below with the emails
+-- FIRST TIME: replace the two example emails just below with the emails
 -- the two of you will log in with. Only those emails can see or change data.
+-- After that, the example emails can stay: they are never added, and the
+-- GitHub Action "Update database schema" reruns this file by itself when it
+-- changes (see INSTALLATION.md).
 -- ============================================================================
 
 create extension if not exists pgcrypto;
@@ -22,6 +25,7 @@ select lower(e) from (values
   ('person1@example.com'),   -- ← replace
   ('person2@example.com')    -- ← replace
 ) as v(e)
+where e not like '%@example.com'
 on conflict do nothing;
 
 -- No API access to this table at all; only the function below reads it.
