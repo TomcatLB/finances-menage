@@ -610,6 +610,19 @@
     const holdingHead = (first, priceSm = true) => h('thead', null, h('tr', null, h('th', { text: first }),
       h('th', { class: 'r hide-sm', text: 'Quantity' }), h('th', { class: 'r hide-sm', text: 'Average cost' }), h('th', { class: priceSm ? 'r' : 'r hide-sm', text: 'Price' }),
       h('th', { class: 'r hide-sm', text: 'Book value' }), h('th', { class: 'r', text: 'Market value' }), h('th', { class: 'r', text: 'Capital gain' }), xHead()));
+    // Totals under each list: book value and gain count only the lines with a known cost.
+    const holdingFoot = (rows, priceSm = true) => {
+      const known = rows.filter((r) => r.mv !== null && r.h.market !== 'CASH' && r.h.avg_cost !== null && r.h.avg_cost !== undefined && r.h.avg_cost !== '');
+      const cost = known.reduce((a, r) => a + r.cost * r.f, 0);
+      const gain = known.reduce((a, r) => a + (r.mv - r.cost) * r.f, 0);
+      const mv = sum(rows);
+      return h('tfoot', null, h('tr', null, h('td', { text: 'Total' }),
+        h('td', { class: 'hide-sm' }), h('td', { class: 'hide-sm' }), h('td', { class: priceSm ? '' : 'hide-sm' }),
+        h('td', { class: 'r hide-sm', text: known.length ? money(cost) : '—' }),
+        h('td', { class: 'r' }, money(mv), sharePct(mv)),
+        h('td', { class: 'r ' + cls(gain) }, known.length ? moneySigned(gain) : '—', h('span', { class: 'sub', text: cost > 0 ? fmtPctS.format(gain / cost) : '' })),
+        h('td', { class: 'x' })));
+    };
     const holdingCells = (r, priceNote, priceSm = true) => {
       const hd = r.h;
       const cash = hd.market === 'CASH';
@@ -621,7 +634,7 @@
         h('td', { class: 'r hide-sm' }, hasCost ? native(num(hd.avg_cost), hd.currency) : '—'),
         h('td', { class: priceSm ? 'r' : 'r hide-sm' }, cash ? '—' : native(r.px, hd.currency), h('span', { class: 'sub' }, cash ? null : priceNote)),
         h('td', { class: 'r hide-sm' }, gain === null ? '—' : money(r.cost * r.f)),
-        h('td', { class: 'r' }, shown === null ? '—' : money(shown), sharePct(shown)),
+        h('td', { class: 'r' }, shown === null ? '—' : h('strong', { text: money(shown) }), sharePct(shown)),
         h('td', { class: 'r ' + cls(gain || 0) }, gain === null ? '—' : moneySigned(gain),
           h('span', { class: 'sub', text: gain !== null && r.cost > 0 ? fmtPctS.format((r.mv - r.cost) / r.cost) : '' })),
       ];
@@ -646,7 +659,7 @@
         addBtn('Add an investment', () => openHolding())],
       pub.length ? h('div', { class: 'table-wrap' }, h('table', null,
         holdingHead('Security'),
-        h('tbody', null, pubBody))) : h('p', { class: 'footnote', text: 'No public investments. Import a statement from your broker (Excel or CSV) or add securities one by one.' }),
+        h('tbody', null, pubBody), holdingFoot(pub))) : h('p', { class: 'footnote', text: 'No public investments. Import a statement from your broker (Excel or CSV) or add securities one by one.' }),
       pub.length ? h('p', { class: 'footnote', text: 'Click a row to edit it, or × to delete it (Undo brings it back). Average cost and price in the security’s currency; values and gains in CAD. The cost of USD securities is converted at today’s rate; for tax, the adjusted cost base uses the rate on the purchase date.' }) : null));
 
     const privBody = priv.map((r) => {
@@ -666,7 +679,7 @@
         addBtn('Add a private investment', () => openHolding(null, { market: 'MANUAL' }))],
       priv.length ? h('div', { class: 'table-wrap' }, h('table', null,
         holdingHead('Investment', false),
-        h('tbody', null, privBody))) : h('p', { class: 'footnote', text: 'No private investments. Add them one by one, or import a sheet with one row per investment (name, value, amount invested, date).' }),
+        h('tbody', null, privBody), holdingFoot(priv, false))) : h('p', { class: 'footnote', text: 'No private investments. Add them one by one, or import a sheet with one row per investment (name, value, amount invested, date).' }),
       priv.length ? h('p', { class: 'footnote', text: 'To update: click a row, or import a new version of the file or link. Rows it recognizes are updated, new ones are added.' }) : null));
     if (!S.outdated) root.append(allocationCard(p), tradesCard(), roomCard());
     return root;
@@ -969,7 +982,9 @@
       rows.length
         ? h('div', { class: 'table-wrap' }, h('table', null,
           h('thead', null, h('tr', null, h('th', { text: 'Asset' }), h('th', { class: 'r hide-sm', text: 'Value as of' }), h('th', { class: 'r', text: 'Value' }), xHead())),
-          h('tbody', null, rows)))
+          h('tbody', null, rows),
+          h('tfoot', null, h('tr', null, h('td', { text: 'Total' }), h('td', { class: 'hide-sm' }),
+            h('td', { class: 'r', text: money(S.assets.reduce((t, a) => t + num(a.value) * sh(a.owner), 0)) }), h('td', { class: 'x' })))))
         : h('p', { class: 'footnote', text: 'No other assets entered. Investments are already counted in the Portfolio tab.' })));
     return root;
   }
@@ -1270,13 +1285,19 @@
       rows.length
         ? h('div', { class: 'table-wrap' }, h('table', null,
           h('thead', null, h('tr', null, h('th', { text: 'Envelope' }), h('th', { class: 'r', text: 'Planned / month' }), h('th', { class: 'r', text: 'Spent' }), h('th', { class: 'r hide-sm', text: 'Since January' }), xHead())),
-          h('tbody', null, rows)))
+          h('tbody', null, rows),
+          h('tfoot', null, h('tr', null, h('td', { text: 'Total' }),
+            h('td', { class: 'r', text: money([...planned.values()].reduce((a, v) => a + v, 0)) }),
+            h('td', { class: 'r', text: money(monthTotal - childSpent) }),
+            h('td', { class: 'r hide-sm', text: money([...lv.ytdByGrp.entries()].filter(([g]) => !isChildGroup(g)).reduce((a, [, v]) => a + v, 0)) }),
+            h('td', { class: 'x' })))))
         : h('p', { class: 'footnote', text: 'Create envelopes (e.g. Travel $300 / month) then note expenses as they happen.' }),
       h('h3', { class: 'subhead', text: `Expenses noted in ${monthLabel(S.month)}` + (monthTotal ? ` · ${money(monthTotal)}` : '') }),
       entries.length
         ? h('div', { class: 'table-wrap' }, h('table', null,
           h('thead', null, h('tr', null, h('th', { text: 'Expense' }), h('th', { class: 'r', text: 'Amount' }), xHead())),
-          h('tbody', null, entries)))
+          h('tbody', null, entries),
+          h('tfoot', null, h('tr', null, h('td', { text: 'Total' }), h('td', { class: 'r', text: money(lv.inMonth.reduce((a, { e, f }) => a + num(e.amount) * f, 0)) }), h('td', { class: 'x' })))))
         : h('p', { class: 'footnote', text: 'Nothing noted this month.' }),
       childSpent ? h('p', { class: 'footnote', text: `Includes ${money(childSpent)} of children’s expenses (details in the Children tab).` }) : null);
   }
@@ -1799,7 +1820,11 @@
           h('p', { class: 'footnote', text: 'The Budget and Projections use this net amount. Update it when the numbers change.' }))),
       lines.length ? h('div', null, h('h3', { class: 'subhead', text: 'Income and expenses' }), h('div', { class: 'table-wrap' }, h('table', null,
         h('thead', null, h('tr', null, h('th', { text: 'Line' }), h('th', { class: 'r', text: 'Per month' }), h('th', { class: 'r hide-sm', text: 'Per year' }), xHead())),
-        h('tbody', null, rows))))
+        h('tbody', null, rows), (() => {
+          const net = lines.reduce((a, l) => a + (l.kind === 'income' ? l.annual : -l.annual), 0);
+          return h('tfoot', null, h('tr', null, h('td', { text: 'Net (income − expenses)' }),
+            h('td', { class: 'r ' + cls(net) }, money(net / 12)), h('td', { class: 'r hide-sm' }, money(net)), h('td', { class: 'x' })));
+        })())))
         : h('p', { class: 'footnote', text: 'Add the company’s income (sales, fees) and expenses (rent, supplies, software…).' }),
       compare);
   }
