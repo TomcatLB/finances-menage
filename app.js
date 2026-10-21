@@ -649,10 +649,13 @@
       const hasCost = !cash && hd.avg_cost !== null && hd.avg_cost !== undefined && hd.avg_cost !== '';
       const shown = r.mv === null ? null : r.mv * r.f;
       const gain = r.mv === null || !hasCost ? null : (r.mv - r.cost) * r.f;
+      // Change on the day: green when the price is up since the previous close, red when it is down.
+      const move = !cash && r.src === 'close' && r.prev ? (r.px - r.prev) / r.prev : null;
       return [
         h('td', { class: 'r hide-sm' }, cash ? '—' : fmtQty.format(num(hd.qty))),
         h('td', { class: 'r hide-sm' }, hasCost ? native(num(hd.avg_cost), hd.currency) : '—'),
-        h('td', { class: priceSm ? 'r' : 'r hide-sm' }, cash ? '—' : native(r.px, hd.currency), h('span', { class: 'sub' }, cash ? null : priceNote)),
+        h('td', { class: (priceSm ? 'r' : 'r hide-sm') + ' ' + cls(move || 0) }, cash ? '—' : h('strong', { text: native(r.px, hd.currency) }),
+          h('span', { class: 'sub' }, cash ? null : [move === null ? null : fmtPctS.format(move), move !== null && priceNote ? ' · ' : null, priceNote])),
         h('td', { class: 'r hide-sm' }, gain === null ? '—' : money(r.cost * r.f)),
         h('td', { class: 'r' }, shown === null ? '—' : h('strong', { text: money(shown) }), sharePct(shown)),
         h('td', { class: 'r ' + cls(gain || 0) }, gain === null ? '—' : moneySigned(gain),
