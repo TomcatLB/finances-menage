@@ -597,10 +597,9 @@
         if (CASH_WORDS.test(plain(sym)) || (!sym && CASH_WORDS.test(plain(name)))) {
           const amount = value ?? qtyIn;
           if (amount === null) return push({ ok: false, line, label: label || 'Cash', reason: 'Missing amount' });
-          if (amount < 0) return push({ ok: false, line, label: label || 'Cash', reason: 'Negative balance (margin): add it under Debts' });
           if (!currency && /usd/.test(plain(sym || name))) currency = 'USD';
           const cur = currency || 'CAD';
-          return push({ ok: true, line, label: 'Cash ' + cur, row: { ...base, market: 'CASH', symbol: cur, currency: cur, name: 'Encaisse', qty: r4(Math.max(0, amount)), avg_cost: null } });
+          return push({ ok: true, line, label: 'Cash ' + cur, row: { ...base, market: 'CASH', symbol: cur, currency: cur, name: 'Encaisse', qty: r4(amount), avg_cost: null } }); // negative: margin owed to the broker
         }
         if (!sym) return push({ ok: false, line, label: label || `Row ${line}`, reason: 'Missing symbol' });
         const sp = splitSymbol(sym);

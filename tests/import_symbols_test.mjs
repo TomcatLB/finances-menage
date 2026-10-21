@@ -71,12 +71,13 @@ console.log('Import symbol formats OK');
   const cols = I.detectHoldingColumns(sheet.rows[header]);
   const pub = I.toHoldings(sheet.rows, header, cols, { kind: 'public', owner: 'p1', account: 'Non enregistré', market: 'TSX' });
   const ok = pub.filter((c) => c.ok).map((c) => `${c.row.symbol}:${c.row.market}:${c.row.currency}`);
-  assert.deepEqual(ok, ['XEQT:TSX:CAD', 'AAPL:US:USD', 'QETH.U:TSX:USD', 'BTC:CRYPTO:USD']);
+  assert.deepEqual(ok, ['CAD:CASH:CAD', 'XEQT:TSX:CAD', 'AAPL:US:USD', 'QETH.U:TSX:USD', 'BTC:CRYPTO:USD']);
+  // Negative cash is a margin balance: kept negative so it reduces the portfolio.
+  assert.equal(pub.find((c) => c.ok && c.row.market === 'CASH').row.qty, -1000);
   assert.equal(pub.find((c) => c.label === 'BTC').row.avg_cost, 50000);
   const reasons = Object.fromEntries(pub.filter((c) => !c.ok).map((c) => [c.label, c.reason]));
-  assert.match(reasons.CASH, /Debts/);
   assert.match(reasons.FUNDA1, /Private investments/);
-  assert.equal(Object.keys(reasons).length, 5); // cash, 2 funds, partnership (no units), note (no symbol); nothing under the total
+  assert.equal(Object.keys(reasons).length, 4); // 2 funds, partnership (no units), note (no symbol); nothing under the total
 
   const priv = I.toHoldings(sheet.rows, header, cols, { kind: 'private', owner: 'p1', account: 'Non enregistré', date: '2026-10-15',
     publicSymbols: new Set(['XEQT', 'AAPL', 'QETH.U', 'BTC']) });

@@ -63,7 +63,7 @@ create table if not exists public.holdings (
   name text,
   market text not null check (market in ('TSX', 'TSXV', 'NEO', 'US', 'CRYPTO', 'MANUAL', 'CASH')),
   currency text not null default 'CAD' check (currency in ('CAD', 'USD')),
-  qty numeric not null check (qty >= 0),
+  qty numeric not null check (qty >= 0 or market = 'CASH'),
   avg_cost numeric check (avg_cost >= 0),
   manual_price numeric check (manual_price >= 0),
   manual_price_date date,
@@ -190,6 +190,9 @@ alter table public.holdings add column if not exists project_id uuid references 
 -- CRYPTO (BTC, ETH…): priced every weekday in USD by the daily job.
 alter table public.holdings drop constraint if exists holdings_market_check;
 alter table public.holdings add constraint holdings_market_check check (market in ('TSX', 'TSXV', 'NEO', 'US', 'CRYPTO', 'MANUAL', 'CASH'));
+-- Cash can be negative: a margin balance owed to the broker.
+alter table public.holdings drop constraint if exists holdings_qty_check;
+alter table public.holdings add constraint holdings_qty_check check (qty >= 0 or market = 'CASH');
 alter table public.budget_items add column if not exists nature text not null default 'fixed';
 alter table public.budget_items add column if not exists child_id uuid references public.children (id) on delete set null;
 alter table public.budget_items add column if not exists gross boolean not null default false;
