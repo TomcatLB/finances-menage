@@ -134,6 +134,15 @@
       .map((p) => p.fetched_at).filter(Boolean).sort().at(-1);
     return at ? new Date(at).toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' }) : null;
   }
+  // When the price job last wrote prices: "8:47 a.m." today, "Oct 20, 6:31 p.m." before.
+  function lastUpdate() {
+    const at = Object.values(S.prices).map((p) => p.fetched_at).filter(Boolean).sort().at(-1);
+    if (!at) return null;
+    const d = new Date(at);
+    const time = d.toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' });
+    const day = d.toLocaleDateString('en-CA');
+    return day === todayISO() ? time : `${fmtDate(day, { day: 'numeric', month: 'short' })}, ${time}`;
+  }
   const cls = (v) => (v > 0.005 ? 'up' : v < -0.005 ? 'down' : '');
   const ownerName = (o) => (o === 'p1' ? S.settings.p1_name : o === 'p2' ? S.settings.p2_name : 'Joint');
   const sh = (owner) => C.share(owner, S.who);
@@ -466,8 +475,10 @@
     const fx = S.prices['FX:USDCAD'];
     const parts = [];
     const live = p ? liveTime() : null;
-    if (live) parts.push(`Prices at ${live}`);
+    if (live) parts.push('Prices during the session');
     else if (p && p.lastClose) parts.push(`Closing prices of ${fmtDate(p.lastClose)}`);
+    const upd = p ? lastUpdate() : null;
+    if (upd) parts.push(`Last update ${upd}`);
     if (fx) parts.push(`USD/CAD ${fmtFx.format(num(fx.close))} (Bank of Canada, ${fmtDate(fx.price_date, { day: 'numeric', month: 'short' })})`);
     const who = h('div', { class: 'seg', role: 'group', 'aria-label': 'Show for' },
       [['all', 'Household'], ['p1', S.settings.p1_name], ['p2', S.settings.p2_name]].map(([k, label]) =>
