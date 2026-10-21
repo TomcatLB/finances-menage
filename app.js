@@ -485,6 +485,7 @@
       business: renderBusiness, projections: renderProjections }[S.tab]();
     const notice = S.outdated ? h('div', { class: 'banner' },
       'New features to turn on: in Supabase, open SQL Editor, paste the supabase/schema.sql file (with your two emails) and click Run. Your data stays as it is.') : null;
+    makeSortable(panel);
     app.replaceChildren(header(), summary(), notice || '', tabs(), panel);
   }
 
@@ -627,6 +628,19 @@
     const holdingHead = (first, priceSm = true) => h('thead', null, h('tr', null, h('th', { text: first }),
       h('th', { class: 'r hide-sm', text: 'Quantity' }), h('th', { class: 'r hide-sm', text: 'Average cost' }), h('th', { class: priceSm ? 'r' : 'r hide-sm', text: 'Price' }),
       h('th', { class: 'r hide-sm', text: 'Book value' }), h('th', { class: 'r', text: 'Market value' }), h('th', { class: 'r', text: 'Capital gain' }), xHead()));
+    // Totals under each list: book value and gain count only the lines with a known cost.
+    const holdingFoot = (rows, priceSm = true) => {
+      const known = rows.filter((r) => r.mv !== null && r.h.market !== 'CASH' && r.h.avg_cost !== null && r.h.avg_cost !== undefined && r.h.avg_cost !== '');
+      const cost = known.reduce((a, r) => a + r.cost * r.f, 0);
+      const gain = known.reduce((a, r) => a + (r.mv - r.cost) * r.f, 0);
+      const mv = sum(rows);
+      return h('tfoot', null, h('tr', null, h('td', { text: 'Total' }),
+        h('td', { class: 'hide-sm' }), h('td', { class: 'hide-sm' }), h('td', { class: priceSm ? '' : 'hide-sm' }),
+        h('td', { class: 'r hide-sm', text: known.length ? money(cost) : '—' }),
+        h('td', { class: 'r' }, money(mv), sharePct(mv)),
+        h('td', { class: 'r ' + cls(gain) }, known.length ? moneySigned(gain) : '—', h('span', { class: 'sub', text: cost > 0 ? fmtPctS.format(gain / cost) : '' })),
+        h('td', { class: 'x' })));
+    };
     const holdingCells = (r, priceNote, priceSm = true) => {
       const hd = r.h;
       const cash = hd.market === 'CASH';
@@ -638,7 +652,7 @@
         h('td', { class: 'r hide-sm' }, hasCost ? native(num(hd.avg_cost), hd.currency) : '—'),
         h('td', { class: priceSm ? 'r' : 'r hide-sm' }, cash ? '—' : native(r.px, hd.currency), h('span', { class: 'sub' }, cash ? null : priceNote)),
         h('td', { class: 'r hide-sm' }, gain === null ? '—' : money(r.cost * r.f)),
-        h('td', { class: 'r' }, shown === null ? '—' : money(shown), sharePct(shown)),
+        h('td', { class: 'r' }, shown === null ? '—' : h('strong', { text: money(shown) }), sharePct(shown)),
         h('td', { class: 'r ' + cls(gain || 0) }, gain === null ? '—' : moneySigned(gain),
           h('span', { class: 'sub', text: gain !== null && r.cost > 0 ? fmtPctS.format((r.mv - r.cost) / r.cost) : '' })),
       ];
@@ -663,7 +677,7 @@
         addBtn('Add an investment', () => openHolding())],
       pub.length ? h('div', { class: 'table-wrap' }, h('table', null,
         holdingHead('Security'),
-        h('tbody', null, pubBody))) : h('p', { class: 'footnote', text: 'No public investments. Import a statement from your broker (Excel or CSV) or add securities one by one.' }),
+        h('tbody', null, pubBody), holdingFoot(pub))) : h('p', { class: 'footnote', text: 'No public investments. Import a statement from your broker (Excel or CSV) or add securities one by one.' }),
       pub.length ? h('p', { class: 'footnote', text: 'Click a row to edit it, or × to delete it (Undo brings it back). Average cost and price in the security’s currency; values and gains in CAD. The cost of USD securities is converted at today’s rate; for tax, the adjusted cost base uses the rate on the purchase date.' }) : null));
 
     const privBody = priv.map((r) => {
@@ -683,7 +697,7 @@
         addBtn('Add a private investment', () => openHolding(null, { market: 'MANUAL' }))],
       priv.length ? h('div', { class: 'table-wrap' }, h('table', null,
         holdingHead('Investment', false),
-        h('tbody', null, privBody))) : h('p', { class: 'footnote', text: 'No private investments. Add them one by one, or import a sheet with one row per investment (name, value, amount invested, date).' }),
+        h('tbody', null, privBody), holdingFoot(priv, false))) : h('p', { class: 'footnote', text: 'No private investments. Add them one by one, or import a sheet with one row per investment (name, value, amount invested, date).' }),
       priv.length ? h('p', { class: 'footnote', text: 'To update: click a row, or import a new version of the file or link. Rows it recognizes are updated, new ones are added.' }) : null));
     if (!S.outdated) root.append(allocationCard(p), tradesCard(), roomCard());
     return root;
@@ -979,14 +993,16 @@
     const rows = S.assets.filter((a) => sh(a.owner)).map((a) =>
       h('tr', { class: 'click', tabindex: '0', onclick: () => openAsset(a), onkeydown: (e) => { if (e.key === 'Enter') openAsset(a); } },
         h('td', null, a.name, h('span', { class: 'sub', text: `${L(a.kind)} · ${ownerName(a.owner)}${sh(a.owner) < 1 ? ' (50%)' : ''}` })),
-        h('td', { class: 'r hide-sm', text: fmtDate(a.as_of) }),
+        h('td', { class: 'r hide-sm', 'data-sort': a.as_of || '', text: fmtDate(a.as_of) }),
         h('td', { class: 'r', text: money(num(a.value) * sh(a.owner)) }),
         xCell('assets', a, a.name)));
     root.append(card('Other assets', 'House, bank accounts, vehicles… Update the value from time to time.', [addBtn('Add an asset', () => openAsset())],
       rows.length
         ? h('div', { class: 'table-wrap' }, h('table', null,
           h('thead', null, h('tr', null, h('th', { text: 'Asset' }), h('th', { class: 'r hide-sm', text: 'Value as of' }), h('th', { class: 'r', text: 'Value' }), xHead())),
-          h('tbody', null, rows)))
+          h('tbody', null, rows),
+          h('tfoot', null, h('tr', null, h('td', { text: 'Total' }), h('td', { class: 'hide-sm' }),
+            h('td', { class: 'r', text: money(S.assets.reduce((t, a) => t + num(a.value) * sh(a.owner), 0)) }), h('td', { class: 'x' })))))
         : h('p', { class: 'footnote', text: 'No other assets entered. Investments are already counted in the Portfolio tab.' })));
     return root;
   }
@@ -1134,6 +1150,62 @@
 
   // --- Budget -----------------------------------------------------------------
   const clickRow = (fn, ...cells) => h('tr', { class: 'click', tabindex: '0', onclick: fn, onkeydown: (e) => { if (e.key === 'Enter') fn(); } }, cells);
+
+  // --- Sortable tables ----------------------------------------------------------
+  // Click a column title to sort the rows, like in a spreadsheet: first click A→Z (text) or largest first (amounts),
+  // second click the other way, third click back to the usual order. The choice is remembered per table.
+  /** What a cell sorts by: its data-sort value, else its own text without the small grey line and badges. */
+  function sortValue(td) {
+    if (!td) return null;
+    if (td.dataset.sort !== undefined) return td.dataset.sort === '' ? null : (Number.isFinite(Number(td.dataset.sort)) ? Number(td.dataset.sort) : td.dataset.sort);
+    let t = '';
+    for (const n of td.childNodes) if (!(n.nodeType === 1 && (n.classList.contains('sub') || n.classList.contains('pill')))) t += n.textContent;
+    t = t.trim();
+    if (!t || t === '—') return null;
+    const c = t.replace(/[\s  ,$%]|US|CA/g, '').replace(/−/g, '-');
+    return /^[-+]?\d*\.?\d+$/.test(c) ? Number(c) : t;
+  }
+  function makeSortable(root) {
+    root.querySelectorAll('table').forEach((table) => {
+      const ths = table.tHead ? [...table.tHead.rows[0].cells] : [];
+      const body = table.tBodies[0];
+      if (!ths.length || !body || body.rows.length < 2) return;
+      const key = 'sort.' + S.tab + ':' + ths.map((th) => th.textContent).join('|');
+      const original = [...body.rows];
+      const apply = (col, dir) => {
+        ths.forEach((th, i) => th.setAttribute('aria-sort', i === col ? (dir > 0 ? 'ascending' : 'descending') : 'none'));
+        if (col < 0) return body.append(...original);
+        const keyed = original.map((tr, i) => ({ tr, i, v: sortValue(tr.cells[col]) }));
+        keyed.sort((a, b) => {
+          if (a.v === null || b.v === null) return (a.v === null) - (b.v === null) || a.i - b.i; // empty cells always last
+          const r = typeof a.v === 'number' && typeof b.v === 'number' ? a.v - b.v
+            : String(a.v).localeCompare(String(b.v), 'en', { numeric: true, sensitivity: 'base' });
+          return r * dir || a.i - b.i;
+        });
+        body.append(...keyed.map((k) => k.tr));
+      };
+      const [sc, sd] = storeGet(key, '').split(':').map(Number);
+      ths.forEach((th, col) => {
+        if (!th.textContent.trim()) return;
+        th.classList.add('sortable');
+        th.tabIndex = 0;
+        th.title = 'Sort by this column';
+        const click = () => {
+          const cur = th.getAttribute('aria-sort');
+          // Amounts start with the largest, text with A.
+          const numeric = original.some((tr) => typeof sortValue(tr.cells[col]) === 'number');
+          const first = numeric ? -1 : 1;
+          let dir = cur === 'none' ? first : (cur === 'ascending') === (first > 0) ? -first : 0;
+          if (!dir) { apply(-1, 0); storeSet(key, ''); return; }
+          apply(col, dir);
+          storeSet(key, `${col}:${dir}`);
+        };
+        th.addEventListener('click', click);
+        th.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); click(); } });
+      });
+      if (ths[sc] && (sd === 1 || sd === -1)) apply(sc, sd); else apply(-1, 0);
+    });
+  }
   const ownerNote = (o, f) => ownerName(o) + (f < 1 ? ' (50%)' : '');
   const childName = (id) => (S.children.find((c) => c.id === id) || {}).name;
   const monthLabel = (m) => new Intl.DateTimeFormat('en-CA', { month: 'long', year: 'numeric' }).format(new Date(m + '-15T12:00:00'));
@@ -1231,11 +1303,19 @@
       rows.length
         ? h('div', { class: 'table-wrap' }, h('table', null,
           h('thead', null, h('tr', null, h('th', { text: 'Envelope' }), h('th', { class: 'r', text: 'Planned / month' }), h('th', { class: 'r', text: 'Spent' }), h('th', { class: 'r hide-sm', text: 'Since January' }), xHead())),
-          h('tbody', null, rows)))
+          h('tbody', null, rows),
+          h('tfoot', null, h('tr', null, h('td', { text: 'Total' }),
+            h('td', { class: 'r', text: money([...planned.values()].reduce((a, v) => a + v, 0)) }),
+            h('td', { class: 'r', text: money(monthTotal - childSpent) }),
+            h('td', { class: 'r hide-sm', text: money([...lv.ytdByGrp.entries()].filter(([g]) => !isChildGroup(g)).reduce((a, [, v]) => a + v, 0)) }),
+            h('td', { class: 'x' })))))
         : h('p', { class: 'footnote', text: 'Create envelopes (e.g. Travel $300 / month) then note expenses as they happen.' }),
       h('h3', { class: 'subhead', text: `Expenses noted in ${monthLabel(S.month)}` + (monthTotal ? ` · ${money(monthTotal)}` : '') }),
       entries.length
-        ? h('div', { class: 'table-wrap' }, h('table', null, h('tbody', null, entries)))
+        ? h('div', { class: 'table-wrap' }, h('table', null,
+          h('thead', null, h('tr', null, h('th', { text: 'Expense' }), h('th', { class: 'r', text: 'Amount' }), xHead())),
+          h('tbody', null, entries),
+          h('tfoot', null, h('tr', null, h('td', { text: 'Total' }), h('td', { class: 'r', text: money(lv.inMonth.reduce((a, { e, f }) => a + num(e.amount) * f, 0)) }), h('td', { class: 'x' })))))
         : h('p', { class: 'footnote', text: 'Nothing noted this month.' }),
       childSpent ? h('p', { class: 'footnote', text: `Includes ${money(childSpent)} of children’s expenses (details in the Children tab).` }) : null);
   }
@@ -1698,7 +1778,8 @@
               r.pct < 100 ? `${fmtYears.format(r.pct)}% deductible` : null].filter(Boolean).join(' · ') })),
             h('td', { class: 'r', text: money(r.total) }),
             h('td', { class: 'r hide-sm', text: money(r.deductible) }),
-            xCell('business_expenses', r.e, r.e.label)))))))
+            xCell('business_expenses', r.e, r.e.label)))),
+          h('tfoot', null, h('tr', null, h('td', { text: 'Total' }), h('td', { class: 'r', text: money(total) }), h('td', { class: 'r hide-sm', text: money(deductible) }), h('td', { class: 'x' }))))))
         : h('p', { class: 'footnote', text: `No business expenses for ${ownerName(p)} in ${year}. Add marketing, client events, software, equipment… A subscription can repeat every month.` })));
 
     const old = oldCompanyCard();
