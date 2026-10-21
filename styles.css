@@ -376,3 +376,11 @@ details.cols ul { margin: 0; padding-left: 18px; }
 .alloc-row .amt { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; font-size: var(--fs-caption); }
 .alloc-row .amt small { display: block; color: var(--muted); font-weight: 600; }
 @media (max-width: 560px) { .alloc-row { grid-template-columns: 1fr auto; } .alloc-row .bar-track { grid-column: 1 / -1; grid-row: 2; } }
+
+/* × in the top right corner of a form window; it stays in view while the window scrolls. */
+.sheet-x {
+  float: right; position: sticky; top: 0; z-index: 1; margin: -10px -10px 0 8px;
+  width: 36px; height: 36px; border: 0; border-radius: var(--r-pill); background: var(--surface); color: var(--muted);
+  font: inherit; font-size: 1.5rem; line-height: 1; cursor: pointer;
+}
+.sheet-x:hover, .sheet-x:focus-visible { color: var(--fg); background: var(--surface-2); }
