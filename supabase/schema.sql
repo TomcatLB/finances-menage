@@ -188,6 +188,23 @@ create table if not exists public.expense_log (
   created_at timestamptz not null default now()
 );
 
+-- Business expenses of each person (marketing, client events, software…), deducted from their personal income.
+-- freq: 'once', or repeating from spend_date until end_date (or for good).
+create table if not exists public.business_expenses (
+  id uuid primary key default gen_random_uuid(),
+  owner text not null check (owner in ('p1', 'p2')),
+  spend_date date not null default current_date,
+  end_date date,
+  label text not null,
+  grp text not null,
+  amount numeric not null check (amount >= 0),
+  freq text not null default 'once' check (freq in ('once', 'weekly', 'biweekly', 'semimonthly', 'monthly', 'yearly')),
+  deductible_pct numeric not null default 100 check (deductible_pct >= 0 and deductible_pct <= 100),
+  note text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 -- Columns added after the first version (safe on a fresh or existing database).
 alter table public.holdings add column if not exists child_id uuid references public.children (id) on delete set null;
 alter table public.holdings add column if not exists project_id uuid references public.projects (id) on delete set null;
@@ -226,7 +243,7 @@ end $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['settings', 'holdings', 'assets', 'debts', 'budget_items', 'children', 'projects'] loop
+  foreach t in array array['settings', 'holdings', 'assets', 'debts', 'budget_items', 'children', 'projects', 'business_expenses'] loop
     execute format('drop trigger if exists touch_updated_at on public.%I', t);
     execute format(
       'create trigger touch_updated_at before update on public.%I
@@ -241,7 +258,7 @@ do $$
 declare t text;
 begin
   foreach t in array array['settings', 'holdings', 'prices', 'assets', 'debts', 'budget_items', 'snapshots',
-                           'children', 'resp_entries', 'projects', 'expense_log'] loop
+                           'children', 'resp_entries', 'projects', 'expense_log', 'business_expenses'] loop
     execute format('alter table public.%I enable row level security', t);
     execute format('revoke all on public.%I from anon', t);
     execute format('grant select, insert, update, delete on public.%I to authenticated', t);

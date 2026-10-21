@@ -41,7 +41,7 @@
   const DEBT_FREQS = Object.fromEntries(Object.entries(FREQS).filter(([k]) => k !== 'yearly').map(([k, v]) => [k, v.label]));
   const ALL_FREQS = Object.fromEntries(Object.entries(FREQS).map(([k, v]) => [k, v.label]));
   const TABS = [['portfolio', 'Portfolio'], ['actifs', 'Assets'], ['budget', 'Budget'], ['enfants', 'Children'], ['dettes', 'Debts'], ['projets', 'Projects'],
-    ['compagnies', 'Companies'], ['projections', 'Projections']];
+    ['business', 'Business expenses'], ['projections', 'Projections']];
   // Saved values (accounts, categories, asset types) stay in French: the database, the importers and older rows use them.
   // The page shows them under these English names.
   const LABELS = {
@@ -59,6 +59,7 @@
     'Logiciels et abonnements': 'Software and subscriptions', 'Téléphone et Internet': 'Phone and Internet', 'Véhicule et déplacements': 'Vehicle and travel',
     'Repas et représentation': 'Meals and entertainment', 'Publicité et marketing': 'Advertising and marketing', 'Honoraires professionnels': 'Professional fees',
     'Frais bancaires et intérêts': 'Bank fees and interest', Formation: 'Training', 'Sous-traitance': 'Subcontracting', 'Salaires d’employés': 'Employee wages', 'Autre dépense': 'Other expense',
+    'Événements clients': 'Client events',
   };
   const L = (v) => LABELS[v] || v;
 
@@ -71,7 +72,8 @@
     who: storeGet('who', 'all'),
     tab: TABS.some(([t]) => t === location.hash.slice(1)) ? location.hash.slice(1) : 'portfolio',
     range: storeGet('range', '1y'),
-    companies: [], company_items: [], transactions: [], contributions: [],
+    companies: [], company_items: [], transactions: [], contributions: [], business: [],
+    bizWho: null, bizYear: new Date().getFullYear(), missing: new Set(),
     loaded: false, denied: false, loadError: null, outdated: false,
   };
 
@@ -186,6 +188,7 @@
     company_items: () => sb.from('company_items').select('*').order('created_at'),
     transactions: () => sb.from('transactions').select('*').order('trade_date', { ascending: false }).limit(5000),
     contributions: () => sb.from('contributions').select('*').order('entry_date'),
+    business: () => sb.from('business_expenses').select('*').order('spend_date', { ascending: false }).limit(5000),
   };
   const missingTable = (e) => /does not exist|Could not find the table|PGRST205|42P01/i.test((e && (e.message || e.code)) || '');
 
@@ -221,6 +224,7 @@
     S.projects = pj || [];
     S.log = lg || [];
     Object.keys(OPTIONAL_TABLES).forEach((k, i) => { S[k] = extra[i].data || []; });
+    S.missing = new Set(Object.keys(OPTIONAL_TABLES).filter((k, i) => extra[i].error));
     // New columns in settings are the other sign of an older database.
     S.outdated = extra.some((r) => r.error) || (st && !('projection' in st));
     S.loaded = true;
@@ -238,7 +242,7 @@
   // undoable() groups the changes of one action (a form, an import, a quick delete) into one step of the Undo button.
   // The steps live in this tab only: reloading the page starts a new list.
   const TABLE_KEY = { holdings: 'holdings', assets: 'assets', debts: 'debts', budget_items: 'budget', children: 'children', resp_entries: 'resp',
-    projects: 'projects', expense_log: 'log', companies: 'companies', company_items: 'company_items', transactions: 'transactions', contributions: 'contributions' };
+    projects: 'projects', expense_log: 'log', companies: 'companies', company_items: 'company_items', transactions: 'transactions', contributions: 'contributions', business_expenses: 'business' };
   const LINK_FIELDS = ['child_id', 'project_id', 'company_id', 'holding_id'];
   const UNDO_MAX = 30;
   const undoStack = [];
@@ -378,19 +382,33 @@
    */
   function budgetNet() {
     const out = new Map();
-    const per = { p1: { employment: 0, selfEmployed: 0, other: 0 }, p2: { employment: 0, selfEmployed: 0, other: 0 } };
     const gross = [];
     for (const b of S.budget) {
       const m = C.monthly(b.amount, b.freq);
       if (!isGross(b)) { out.set(b, m); continue; }
-      for (const [p, part] of owners(b)) per[p][GROSS_KIND[b.grp]] += m * 12 * part;
       gross.push([b, m]);
     }
     if (!gross.length) return out;
+    // This year's deductible business expenses lower each person's tax (Business expenses tab).
+    const per = grossIncome();
+    const ded = bizDeductions(new Date().getFullYear());
     const keep = {};
-    for (const p of ['p1', 'p2']) keep[p] = 1 - T().netIncome(per[p]).rate;
+    for (const p of ['p1', 'p2']) {
+      const total = per[p].employment + per[p].selfEmployed + per[p].other;
+      keep[p] = total > 0 ? 1 - T().personalTax({ ...per[p], selfEmployed: per[p].selfEmployed - ded[p] }).total / total : 1;
+    }
     for (const [b, m] of gross) out.set(b, owners(b).reduce((a, [p, part]) => a + m * part * keep[p], 0));
     return out;
+  }
+
+  /** Each person's gross Budget income per year, by how it is taxed (joint lines 50/50). */
+  function grossIncome() {
+    const per = { p1: { employment: 0, selfEmployed: 0, other: 0 }, p2: { employment: 0, selfEmployed: 0, other: 0 } };
+    for (const b of S.budget) {
+      if (!isGross(b)) continue;
+      for (const [p, part] of owners(b)) per[p][GROSS_KIND[b.grp]] += C.monthly(b.amount, b.freq) * 12 * part;
+    }
+    return per;
   }
 
   function budgetView() {
@@ -464,7 +482,7 @@
         h('p', { text: `${S.session.user.email} is not on the list of household members. Add this email to the allowed_users table in Supabase.` })));
     }
     const panel = { portfolio: renderPortfolio, actifs: renderActifs, budget: renderBudget, enfants: renderEnfants, dettes: renderDettes, projets: renderProjets,
-      compagnies: renderCompagnies, projections: renderProjections }[S.tab]();
+      business: renderBusiness, projections: renderProjections }[S.tab]();
     const notice = S.outdated ? h('div', { class: 'banner' },
       'New features to turn on: in Supabase, open SQL Editor, paste the supabase/schema.sql file (with your two emails) and click Run. Your data stays as it is.') : null;
     makeSortable(panel);
@@ -1232,7 +1250,7 @@
       b.income.length
         ? [h('div', { class: 'table-wrap' }, h('table', null, head('Source'), h('tbody', null, b.income.map(line)), total(b.inc))),
           b.income.some((r) => isGross(r.b))
-            ? h('p', { class: 'footnote', text: 'Gross income: “Per month” is an estimate after tax and contributions (QPP, QPIP, HSF), worked out per person from their gross Budget income only. Not modelled: deductions (RRSP, expenses), credits, other income and the tax actually withheld at source.' })
+            ? h('p', { class: 'footnote', text: 'Gross income: “Per month” is an estimate after tax and contributions (QPP, QPIP, HSF), worked out per person from their gross Budget income, minus this year’s deductible business expenses. Not modelled: other deductions (RRSP…), credits, other income and the tax actually withheld at source.' })
             : null]
         : h('p', { class: 'footnote', text: 'Add salaries (gross or net), allowances and other income, or import a statement to detect them.' })));
 
@@ -1676,218 +1694,157 @@
     return root;
   }
 
-  // --- Compagnies ---------------------------------------------------------------
-  const CO_INCOME = ['Ventes et honoraires', 'Subventions', 'Autre revenu'];
-  const CO_EXPENSE = {
-    'Loyer et bureau': 100, 'Matériel et équipement': 100, 'Logiciels et abonnements': 100, 'Téléphone et Internet': 100,
-    'Véhicule et déplacements': 100, 'Repas et représentation': 50, 'Publicité et marketing': 100, 'Honoraires professionnels': 100,
-    'Assurances': 100, 'Frais bancaires et intérêts': 100, 'Formation': 100, 'Sous-traitance': 100, 'Salaires d’employés': 100, 'Autre dépense': 100,
+  // --- Business expenses ----------------------------------------------------------
+  // Each person's business expenses (marketing, client events, software…), deducted from their own taxable income.
+  const BIZ_EXPENSE = {
+    'Publicité et marketing': 100, 'Événements clients': 50, 'Repas et représentation': 50, 'Logiciels et abonnements': 100,
+    'Matériel et équipement': 100, 'Téléphone et Internet': 100, 'Véhicule et déplacements': 100, 'Loyer et bureau': 100,
+    'Honoraires professionnels': 100, 'Formation': 100, 'Sous-traitance': 100, 'Assurances': 100, 'Frais bancaires et intérêts': 100, 'Autre dépense': 100,
   };
-  const CO_KIND = { inc: 'Incorporated company (inc.)', autonome: 'Self-employed' };
+  const BIZ_FREQS = { once: 'One time', ...ALL_FREQS };
   const T = () => window.Tax;
-  const taxSettings = () => ({ p1_job: 0, p2_job: 0, p1_other: 0, p2_other: 0, cnesst: null, ...(S.settings.tax || {}) });
-  /** Each person's income outside the companies, as a personalTax input. */
-  const personBase = (p) => { const t = taxSettings(); return { employment: num(t[p + '_job']), other: num(t[p + '_other']) }; };
-  const coLines = (c) => S.company_items.filter((i) => i.company_id === c.id)
-    .map((i) => ({ ...i, annual: C.monthly(i.amount, i.freq) * 12, deductiblePct: num(i.deductible_pct) }));
-  const owners = (c) => (c.owner === 'joint' ? [['p1', 0.5], ['p2', 0.5]] : [[c.owner, 1]]);
+  const PEOPLE = ['p1', 'p2'];
+  const owners = (x) => (x.owner === 'joint' ? [['p1', 0.5], ['p2', 0.5]] : [[x.owner, 1]]);
 
-  /** A company's year, plus the personal tax its payouts cause for each owner (marginal, on top of their other income). */
-  function companyView(c) {
-    const X = T();
-    const opts = { cnesstRate: taxSettings().cnesst != null ? num(taxSettings().cnesst) / 100 : undefined };
-    const lines = coLines(c);
-    const y = X.companyYear(c, lines, { salary: num(c.salary), dividends: num(c.dividends) }, opts);
-    let personal = 0;
-    for (const [p, part] of owners(c)) {
-      const extra = c.kind === 'autonome' ? { selfEmployed: y.profit * part } : { employment: y.salary * part, nonEligibleDiv: y.dividends * part };
-      personal += X.extraTax(personBase(p), extra);
+  /** How many times an expense is paid in a calendar year (one-time, or repeating from its date until its end date). */
+  function bizCount(e, year) {
+    const start = String(e.spend_date || '').slice(0, 10);
+    if (!start) return 0;
+    if (!e.freq || e.freq === 'once') return start.slice(0, 4) === String(year) ? 1 : 0;
+    const last = e.end_date && e.end_date < `${year}-12-31` ? e.end_date : `${year}-12-31`;
+    const [y, m, d] = start.split('-').map(Number);
+    const at = (months, days) => new Date(Date.UTC(y, m - 1 + months, d + days)).toISOString().slice(0, 10);
+    const nth = { weekly: (k) => at(0, 7 * k), biweekly: (k) => at(0, 14 * k), semimonthly: (k) => at(Math.floor(k / 2), (k % 2) * 15),
+      monthly: (k) => at(k, 0), yearly: (k) => at(12 * k, 0) }[e.freq] || ((k) => at(k, 0));
+    let n = 0;
+    for (let k = 0; k < 100000; k++) {
+      const dt = nth(k);
+      if (dt > last) break;
+      if (dt.slice(0, 4) === String(year)) n++;
     }
-    const pocket = c.kind === 'autonome' ? y.available - personal : y.salary + y.dividends - personal;
-    const scenarios = c.kind === 'inc' && y.available > 0
-      ? X.payoutScenarios(c, lines, { salary: num(c.salary), dividends: num(c.dividends) }, c.owner === 'joint' ? personBase('p1') : personBase(c.owner), opts) : null;
-    return { c, lines, y, personal, pocket, scenarios };
+    return n;
   }
+  const bizRows = (p, year) => S.business.filter((e) => e.owner === p).map((e) => {
+    const total = num(e.amount) * bizCount(e, year);
+    const pct = e.deductible_pct == null ? 100 : num(e.deductible_pct);
+    return { e, total, deductible: total * pct / 100, pct };
+  });
+  /** Deductible business expenses of each person for a year. */
+  const bizDeductions = (year) => Object.fromEntries(PEOPLE.map((p) => [p, bizRows(p, year).reduce((a, r) => a + r.deductible, 0)]));
 
-  function renderCompagnies() {
-    const root = h('div', { role: 'tabpanel', 'aria-labelledby': 'tab-compagnies' });
-    if (S.outdated) {
-      root.append(h('section', { class: 'card empty' }, h('strong', { text: 'Database needs an update' }),
-        h('p', { text: 'To turn on companies, run the supabase/schema.sql file again in Supabase (SQL Editor → Run). Your data stays as it is.' })));
+  function renderBusiness() {
+    const root = h('div', { role: 'tabpanel', 'aria-labelledby': 'tab-business' });
+    if (S.missing.has('business')) {
+      root.append(h('section', { class: 'card empty' }, h('strong', { text: 'Database update on its way' }),
+        h('p', { text: 'Business expenses need a new table. It is added automatically a minute or two after the change goes live; reload the page then. Your data stays as it is.' })));
       return root;
     }
-    const list = S.companies.filter((c) => sh(c.owner));
-    if (!list.length) {
-      root.append(h('section', { class: 'card empty' },
-        h('strong', { text: 'No companies' }),
-        h('p', { text: 'Add your company (incorporated or self-employed), its income and its expenses: the app estimates the company’s tax, the personal tax on what you pay yourselves, and what really ends up in your pockets.' }),
-        h('div', { class: 'card-actions' }, addBtn('Add a company', () => openCompany()),
-          h('button', { class: 'btn', type: 'button', onclick: openTaxSettings, text: 'Your other income' }))));
-      return root;
-    }
-    const views = list.map(companyView);
-    const share = (c) => sh(c.owner);
-    const tot = views.reduce((a, v) => {
-      const f = share(v.c);
-      a.rev += v.y.revenue * f; a.exp += v.y.expenses * f; a.pocket += v.pocket * f;
-      a.tax += ((v.y.corpTax ? v.y.corpTax.total : 0) + v.personal + (v.y.employer ? v.y.employer.total : 0)) * f;
-      a.kept += (v.y.retained || 0) * f;
-      return a;
-    }, { rev: 0, exp: 0, pocket: 0, tax: 0, kept: 0 });
-    root.append(card('Overview', 'Per year, from the amounts entered', [
-      h('button', { class: 'btn', type: 'button', onclick: openTaxSettings, text: 'Your other income' }),
-      addBtn('Add a company', () => openCompany())],
-    h('div', { class: 'kpis' },
-      kpi('Revenue', money(tot.rev), `${money(tot.rev / 12)} / month`),
-      kpi('Expenses', money(tot.exp), `${money(tot.exp / 12)} / month`),
-      kpi('Taxes and payroll costs', money(tot.tax), tot.rev - tot.exp > 0 ? `${fmtPct.format(tot.tax / (tot.rev - tot.exp))} of profit` : null),
-      kpi('In your pockets', h('span', { class: cls(tot.pocket), text: money(tot.pocket) }), `${money(tot.pocket / 12)} / month, after tax`))));
+    if (!PEOPLE.includes(S.bizWho)) S.bizWho = PEOPLE.includes(S.who) ? S.who : 'p1';
+    const p = S.bizWho;
+    const year = S.bizYear;
+    const rows = bizRows(p, year).filter((r) => r.total > 0).sort((a, b) => String(b.e.spend_date).localeCompare(String(a.e.spend_date)));
+    const total = rows.reduce((a, r) => a + r.total, 0);
+    const deductible = rows.reduce((a, r) => a + r.deductible, 0);
 
-    for (const v of views) root.append(companyCard(v));
-    root.append(h('p', { class: 'footnote', text: `${T().PARAMS.year} estimates for Québec, as a guide only: federal and Québec income tax, QPP, QPIP, Health Services Fund and CNESST. Not included: refundable and family credits, capital cost allowance (CCA), minimum tax, the company’s investment income, instalments. Check the numbers with your accountant before deciding.` }));
+    // Tax saved: the person's gross income in the Budget, taxed with and without these deductions.
+    const income = grossIncome()[p];
+    const hasIncome = income.employment + income.selfEmployed + income.other > 0;
+    const X = T();
+    const saved = hasIncome ? X.personalTax(income).total - X.personalTax({ ...income, selfEmployed: income.selfEmployed - deductible }).total : 0;
+
+    const person = h('div', { class: 'seg', role: 'group', 'aria-label': 'Person' },
+      PEOPLE.map((k) => h('button', { type: 'button', 'aria-pressed': String(p === k), onclick: () => { S.bizWho = k; render(); }, text: ownerName(k) })));
+    const nav = h('div', { class: 'seg', role: 'group', 'aria-label': 'Year' },
+      h('button', { type: 'button', 'aria-label': 'Previous year', onclick: () => { S.bizYear--; render(); }, text: '‹' }),
+      h('button', { type: 'button', 'aria-pressed': 'true', text: String(year) }),
+      h('button', { type: 'button', 'aria-label': 'Next year', onclick: () => { S.bizYear++; render(); }, text: '›' }));
+    root.append(h('div', { class: 'card-actions' }, person, nav));
+
+    root.append(card(`${ownerName(p)}’s business expenses`, `${year}, deducted from ${ownerName(p)}’s personal income`,
+      [addBtn('Add an expense', () => openBusinessExpense(null, p))],
+      h('div', { class: 'kpis' },
+        kpi('Spent', money(total), `${rows.length} expense${rows.length === 1 ? '' : 's'}`),
+        kpi('Deductible', money(deductible), total > deductible ? `${money(total - deductible)} not deductible (meals, personal use)` : 'all of it'),
+        kpi('Tax saved (estimate)', h('span', { class: saved > 0 ? 'up' : '', text: hasIncome ? money(saved) : '—' }),
+          hasIncome ? (deductible > 0 ? `${fmtPct.format(saved / deductible)} of each deductible dollar` : null) : `Enter ${ownerName(p)}’s gross income in Budget to see it`)),
+      rows.length ? bizCategories(rows) : null,
+      rows.length
+        ? h('div', null, h('h3', { class: 'subhead', text: 'Expenses' }), h('div', { class: 'table-wrap' }, h('table', null,
+          h('thead', null, h('tr', null, h('th', { text: 'Expense' }), h('th', { class: 'r', text: `In ${year}` }), h('th', { class: 'r hide-sm', text: 'Deductible' }), xHead())),
+          h('tbody', null, rows.map((r) => clickRow(() => openBusinessExpense(r.e, p),
+            h('td', null, r.e.label, h('span', { class: 'sub', text: [
+              fmtDate(r.e.spend_date, { day: 'numeric', month: 'short', year: 'numeric' }), L(r.e.grp),
+              r.e.freq && r.e.freq !== 'once' ? `${BIZ_FREQS[r.e.freq]} ${money(num(r.e.amount))}` + (r.e.end_date ? ` until ${fmtDate(r.e.end_date, { day: 'numeric', month: 'short', year: 'numeric' })}` : '') : null,
+              r.pct < 100 ? `${fmtYears.format(r.pct)}% deductible` : null].filter(Boolean).join(' · ') })),
+            h('td', { class: 'r', text: money(r.total) }),
+            h('td', { class: 'r hide-sm', text: money(r.deductible) }),
+            xCell('business_expenses', r.e, r.e.label)))),
+          h('tfoot', null, h('tr', null, h('td', { text: 'Total' }), h('td', { class: 'r', text: money(total) }), h('td', { class: 'r hide-sm', text: money(deductible) }), h('td', { class: 'x' }))))))
+        : h('p', { class: 'footnote', text: `No business expenses for ${ownerName(p)} in ${year}. Add marketing, client events, software, equipment… A subscription can repeat every month.` })));
+
+    const old = oldCompanyCard();
+    if (old) root.append(old);
+    root.append(h('p', { class: 'footnote', text: `Tax saved is a ${X.PARAMS.year} Québec + federal estimate: each person’s gross income entered in Budget, taxed with and without the deductible expenses (expenses above business income also lower tax on other income). The Budget’s after-tax income counts this year’s deductions. Not modelled: GST/QST, capital cost allowance (equipment is deducted at once here), home-office rules, credits. Check with your accountant.` }));
     return root;
   }
 
-  function companyCard(v) {
-    const { c, y, lines, personal, pocket, scenarios } = v;
-    const inc = c.kind === 'inc';
-    const pct = (a, b) => (b > 0 ? ` (${fmtPct.format(a / b)})` : '');
-    const flow = inc ? [
-      fact('Revenue', money(y.revenue)),
-      fact('Expenses', '− ' + money(y.expenses)),
-      fact('Salary paid', '− ' + money(y.salary)),
-      fact('Payroll costs on the salary', '− ' + money(y.employer.total)),
-      fact('Taxable profit', money(y.taxable)),
-      fact('Company tax', '− ' + money(y.corpTax.total) + (y.taxable > 0 ? pct(y.corpTax.total, y.taxable) : '')),
-      fact('Dividends paid', '− ' + money(y.dividends)),
-      fact('Left in the company', h('span', { class: cls(y.retained), text: money(y.retained) })),
-    ] : [
-      fact('Revenue', money(y.revenue)),
-      fact('Expenses', '− ' + money(y.expenses)),
-      fact('Business profit', money(y.profit)),
-      fact('Tax and contributions', '− ' + money(personal) + pct(personal, y.profit)),
-    ];
-    const personalFacts = inc ? [
-      fact('Paid to you', money(y.salary + y.dividends)),
-      fact('Personal tax and QPP/QPIP', '− ' + money(personal)),
-      fact('In your pockets', h('strong', { class: cls(pocket), text: `${money(pocket)} (${money(pocket / 12)} / month)` })),
-    ] : [fact('In your pockets', h('strong', { class: cls(pocket), text: `${money(pocket)} (${money(pocket / 12)} / month)` }))];
-
-    const rows = [...lines].sort((a, b) => (a.kind === b.kind ? b.annual - a.annual : a.kind === 'income' ? -1 : 1)).map((l) => clickRow(() => openCompanyItem(c, l),
-      h('td', null, l.name, h('span', { class: 'sub', text: L(l.grp) + (l.kind === 'expense' && l.deductiblePct < 100 ? ` · ${fmtYears.format(l.deductiblePct)}% deductible` : '') })),
-      h('td', { class: 'r ' + (l.kind === 'income' ? 'up' : '') }, (l.kind === 'income' ? '' : '− ') + money(l.annual / 12), h('span', { class: 'sub', text: '/ month' })),
-      h('td', { class: 'r hide-sm' }, money(l.annual), h('span', { class: 'sub', text: '/ year' })),
-      xCell('company_items', l, l.name)));
-
-    let compare = null;
-    if (scenarios) {
-      // Only the two ways that empty the company are comparable; what stays inside is still taxed when it comes out.
-      const best = Math.max(scenarios[0].pocket, scenarios[1].pocket);
-      compare = h('div', null, h('h3', { class: 'subhead', text: 'Salary or dividends?' }),
-        h('div', { class: 'table-wrap' }, h('table', null,
-          h('thead', null, h('tr', null, h('th', { text: 'How you pay yourself' }), h('th', { class: 'r', text: 'In your pockets' }), h('th', { class: 'r hide-sm', text: 'Taxes and payroll costs' }), h('th', { class: 'r', text: 'Left in the company' }))),
-          h('tbody', null, scenarios.map((s2) => h('tr', null,
-            h('td', null, s2.label, h('span', { class: 'sub', text: `salary ${money(s2.salary)} · dividends ${money(s2.dividends)}` })),
-            h('td', { class: 'r' }, money(s2.pocket), s2 !== scenarios[2] && Math.abs(s2.pocket - best) < 1 ? h('span', { class: 'sub' }, h('span', { class: 'pill ok', text: 'pays the most' })) : null),
-            h('td', { class: 'r hide-sm' }, money(s2.totalTax)),
-            h('td', { class: 'r' }, money(s2.retained))))))),
-        h('p', { class: 'footnote', text: 'The same money available, paid out three ways. Salary also earns QPP and creates RRSP room; dividends do not. Money left in the company will be taxed when it comes out.' }));
+  function bizCategories(rows) {
+    const by = new Map();
+    for (const r of rows) {
+      const g = by.get(r.e.grp) || { total: 0, deductible: 0 };
+      g.total += r.total; g.deductible += r.deductible;
+      by.set(r.e.grp, g);
     }
-
-    const budgetName = `Net income – ${c.name}`;
-    const inBudget = S.budget.find((b) => b.name === budgetName || b.name === `Revenu net – ${c.name}`); // older lines kept the French name
-    const monthlyPocket = Math.round(Math.max(0, pocket) / 12);
-    const syncBtn = h('button', { class: 'btn', type: 'button', text: inBudget ? `Update the Budget (${money(monthlyPocket)} / month)` : `Add to the Budget (${money(monthlyPocket)} / month)`,
-      onclick: async () => {
-        try {
-          await saveRow('budget_items', { id: inBudget && inBudget.id, name: budgetName, grp: 'Travail autonome', kind: 'income', nature: 'fixed', amount: monthlyPocket, freq: 'monthly', owner: c.owner, child_id: null });
-          toast('Budget updated'); refresh();
-        } catch (e) { toast(errText(e), true); }
-      } });
-
-    return h('section', { class: 'card' },
-      h('div', { class: 'card-head' },
-        h('div', null, h('h2', { text: c.name }), h('p', { text: [CO_KIND[c.kind], ownerName(c.owner), inc ? (c.sbd_hours ? 'reduced Québec rate (5,500 h)' : 'Québec rate without the 5,500 h') : null].filter(Boolean).join(' · ') })),
-        h('div', { class: 'actions' },
-          h('button', { class: 'btn ghost', type: 'button', onclick: () => openCompany(c), text: 'Edit' }),
-          h('button', { class: 'btn', type: 'button', onclick: () => openCompanyItem(c, { kind: 'expense' }), text: 'Expense' }),
-          addBtn('Income', () => openCompanyItem(c, { kind: 'income' })),
-          xBtn('companies', c, c.name))),
-      h('div', { class: 'grid tight' },
-        h('div', null, h('h3', { class: 'subhead', text: inc ? 'In the company (per year)' : 'Per year' }), h('dl', { class: 'facts' }, flow)),
-        h('div', null, h('h3', { class: 'subhead', text: 'For you' }), h('dl', { class: 'facts' }, personalFacts),
-          h('div', { class: 'card-actions' }, syncBtn),
-          h('p', { class: 'footnote', text: 'The Budget and Projections use this net amount. Update it when the numbers change.' }))),
-      lines.length ? h('div', null, h('h3', { class: 'subhead', text: 'Income and expenses' }), h('div', { class: 'table-wrap' }, h('table', null,
-        h('thead', null, h('tr', null, h('th', { text: 'Line' }), h('th', { class: 'r', text: 'Per month' }), h('th', { class: 'r hide-sm', text: 'Per year' }), xHead())),
-        h('tbody', null, rows), (() => {
-          const net = lines.reduce((a, l) => a + (l.kind === 'income' ? l.annual : -l.annual), 0);
-          return h('tfoot', null, h('tr', null, h('td', { text: 'Net (income − expenses)' }),
-            h('td', { class: 'r ' + cls(net) }, money(net / 12)), h('td', { class: 'r hide-sm' }, money(net)), h('td', { class: 'x' })));
-        })())))
-        : h('p', { class: 'footnote', text: 'Add the company’s income (sales, fees) and expenses (rent, supplies, software…).' }),
-      compare);
+    return h('div', null, h('h3', { class: 'subhead', text: 'By category' }), h('div', { class: 'table-wrap' }, h('table', null,
+      h('thead', null, h('tr', null, h('th', { text: 'Category' }), h('th', { class: 'r', text: 'Spent' }), h('th', { class: 'r hide-sm', text: 'Deductible' }))),
+      h('tbody', null, [...by.entries()].sort((a, b) => b[1].total - a[1].total).map(([g, v]) => h('tr', null,
+        h('td', { text: L(g) }), h('td', { class: 'r', text: money(v.total) }), h('td', { class: 'r hide-sm', text: money(v.deductible) })))))));
   }
 
-  function openCompany(c) {
-    const v = c ? { ...c, sbd_hours: c.sbd_hours ? 'oui' : 'non' } : { kind: 'inc', owner: S.who === 'all' ? 'p1' : S.who, sbd_hours: 'non', salary: '', dividends: '' };
+  /** Expense lines saved by the former Companies page, if any: offer to copy them here once. */
+  function oldCompanyCard() {
+    const items = S.company_items.filter((i) => i.kind === 'expense');
+    if (!items.length || S.business.some((e) => String(e.note || '').startsWith('From the Companies page'))) return null;
+    const move = async () => {
+      const start = `${new Date().getFullYear()}-01-01`;
+      const out = [];
+      for (const i of items) {
+        const co = S.companies.find((c) => c.id === i.company_id) || {};
+        const who = co.owner === 'p2' ? [['p2', 1]] : co.owner === 'joint' ? [['p1', 0.5], ['p2', 0.5]] : [['p1', 1]];
+        for (const [owner, part] of who) {
+          out.push({ owner, label: i.name, grp: BIZ_EXPENSE[i.grp] != null ? i.grp : 'Autre dépense', amount: Math.round(num(i.amount) * part * 100) / 100,
+            freq: FREQS[i.freq] ? i.freq : 'monthly', spend_date: start, deductible_pct: i.deductible_pct == null ? 100 : num(i.deductible_pct),
+            note: `From the Companies page${co.name ? ` (${co.name})` : ''}` });
+        }
+      }
+      try { await undoable('copy company expenses', () => insertRows('business_expenses', out)); toast('Expenses copied'); refresh(); } catch (e) { toast(errText(e), true); }
+    };
+    return card('Expenses from the old Companies page', `${items.length} expense line${items.length === 1 ? '' : 's'} saved there. Copy them here as repeating expenses from January 1 (joint ones split 50/50); the old lines are kept.`,
+      [addBtn('Copy them here', move)]);
+  }
+
+  function openBusinessExpense(e, p) {
+    const groups = Object.keys(BIZ_EXPENSE);
+    const v = e ? { ...e, freq: e.freq || 'once' } : { owner: p, spend_date: S.bizYear === new Date().getFullYear() ? todayISO() : `${S.bizYear}-01-01`, grp: groups[0], freq: 'once', deductible_pct: BIZ_EXPENSE[groups[0]] };
     openForm({
-      title: c ? 'Edit the company' : 'Add a company',
+      title: e ? 'Edit the business expense' : `${ownerName(p)}: business expense`,
       values: v,
       fields: [
-        { k: 'name', label: 'Name', type: 'text', req: true, wide: true, placeholder: 'Studio Photo inc.' },
-        { k: 'kind', label: 'Structure', type: 'select', options: CO_KIND },
-        { k: 'owner', label: 'Owner', type: 'owner' },
-        { k: 'salary', label: 'Salary paid (gross, per year)', type: 'num', show: (s) => s.kind === 'inc', clearWhenHidden: true, hint: 'What the company pays you as salary' },
-        { k: 'dividends', label: 'Dividends paid (per year)', type: 'num', show: (s) => s.kind === 'inc', clearWhenHidden: true, hint: 'Ordinary (non-eligible) dividends' },
-        { k: 'sbd_hours', label: 'Paid hours in the year', type: 'select', show: (s) => s.kind === 'inc', wide: true,
-          options: { non: 'Under 5,500 h (one or two people): Québec rate 11.5%', oui: '5,500 h or more: reduced Québec rate 3.2%' },
-          hint: 'Hours paid to employees (40 h/week max per person). The reduced Québec rate drops to 2.2% for years starting after April 29, 2026.' },
+        { k: 'label', label: 'Description', type: 'text', req: true, wide: true, placeholder: 'Instagram ads, client cocktail, Adobe…' },
+        { k: 'amount', label: (s) => (s.freq === 'once' ? 'Amount' : 'Amount each time'), type: 'num', req: true },
+        { k: 'spend_date', label: (s) => (s.freq === 'once' ? 'Date' : 'First payment'), type: 'date', req: true },
+        { k: 'grp', label: 'Category', type: 'select', options: groups, onChange: (s) => { s.deductible_pct = BIZ_EXPENSE[s.grp]; } },
+        { k: 'freq', label: 'Repeats', type: 'select', options: BIZ_FREQS },
+        { k: 'end_date', label: 'Last payment (optional)', type: 'date', show: (s) => s.freq !== 'once', clearWhenHidden: true, hint: 'Leave empty while it keeps going' },
+        { k: 'deductible_pct', label: 'Deductible part (%)', type: 'num', hint: 'Meals, entertainment and client events: 50%. Something also used personally: only the business part.' },
+        { k: 'owner', label: 'Whose business', type: 'select', options: { p1: ownerName('p1'), p2: ownerName('p2') } },
         { k: 'note', label: 'Note (optional)', type: 'text', wide: true },
       ],
-      onSave: (out) => saveRow('companies', { ...out, id: c && c.id, salary: out.salary || 0, dividends: out.dividends || 0, sbd_hours: out.sbd_hours === 'oui' }),
-      onDelete: c ? () => deleteRow('companies', c.id) : null,
-    });
-  }
-
-  function openCompanyItem(c, item) {
-    const existing = item && item.id;
-    const kind = item.kind || 'expense';
-    const groups = kind === 'income' ? CO_INCOME : Object.keys(CO_EXPENSE);
-    const v = existing ? { ...item } : { kind, grp: groups[0], freq: 'monthly', deductible_pct: kind === 'income' ? 100 : CO_EXPENSE[groups[0]] };
-    openForm({
-      title: existing ? 'Edit the line' : kind === 'income' ? `${c.name} income` : `${c.name} expense`,
-      values: v,
-      fields: [
-        { k: 'grp', label: 'Category', type: 'select', options: groups, onChange: (s) => { if (kind === 'expense') s.deductible_pct = CO_EXPENSE[s.grp]; } },
-        { k: 'name', label: 'Description', type: 'text', req: true, wide: true, placeholder: kind === 'income' ? 'Photo contracts' : 'Adobe Creative Cloud' },
-        { k: 'amount', label: 'Amount', type: 'num', req: true },
-        { k: 'freq', label: 'Frequency', type: 'select', options: ALL_FREQS },
-        { k: 'deductible_pct', label: 'Deductible part (%)', type: 'num', show: () => kind === 'expense', hint: 'Meals and entertainment: 50%. Personal use of an item: only the business part.' },
-      ],
       onSave: (out) => {
-        const pctVal = out.deductible_pct === null || out.deductible_pct === undefined ? 100 : Math.min(100, out.deductible_pct);
-        return saveRow('company_items', { ...out, id: existing ? item.id : undefined, company_id: c.id, kind, deductible_pct: pctVal });
+        const pctVal = out.deductible_pct === null || out.deductible_pct === undefined ? 100 : Math.max(0, Math.min(100, out.deductible_pct));
+        return saveRow('business_expenses', { ...out, id: e && e.id, deductible_pct: pctVal, end_date: out.freq === 'once' ? null : out.end_date || null });
       },
-      onDelete: existing ? () => deleteRow('company_items', item.id) : null,
-    });
-  }
-
-  function openTaxSettings() {
-    const t = taxSettings();
-    openForm({
-      title: 'Your income outside the companies',
-      values: { ...t, cnesst: t.cnesst ?? T().PARAMS.cnesstDefault * 100 },
-      fields: [
-        { k: 'p1_job', label: `${S.settings.p1_name}: salary from a job (gross / year)`, type: 'num', hint: 'A job outside your companies' },
-        { k: 'p2_job', label: `${S.settings.p2_name}: salary from a job (gross / year)`, type: 'num' },
-        { k: 'p1_other', label: `${S.settings.p1_name}: other taxable income (/ year)`, type: 'num', hint: 'Rent, interest, pension…' },
-        { k: 'p2_other', label: `${S.settings.p2_name}: other taxable income (/ year)`, type: 'num' },
-        { k: 'cnesst', label: 'Company’s CNESST rate (%)', type: 'num', hint: 'On your CNESST notice of assessment; depends on the industry' },
-      ],
-      onSave: async (out) => {
-        await saveSettings({ tax: { ...t, ...out } });
-      },
+      onDelete: e ? () => deleteRow('business_expenses', e.id) : null,
     });
   }
 
@@ -2733,10 +2690,8 @@
       { name: 'RESP', rows: [['Child', 'Date', 'Type', 'Contribution', 'CESG', 'QESI', 'Note'],
         ...S.resp.map((r) => [(S.children.find((c) => c.id === r.child_id) || {}).name, r.entry_date, r.kind === 'opening' ? 'Starting balance' : 'Contribution', n(r.amount), n(r.cesg), n(r.iqee), r.note])] },
       { name: 'Projects', rows: [['Name', 'Target', 'Target date', 'Already set aside', 'Per month', 'Return %'], ...S.projects.map((p) => [p.name, n(p.target_amount), p.target_date, n(p.saved), n(p.monthly_contribution), n(p.expected_return)])] },
-      { name: 'Companies', rows: [['Name', 'Structure', 'Owner', 'Salary', 'Dividends', '5,500 h', 'Revenue / year', 'Expenses / year', 'Company tax', 'In your pockets'],
-        ...S.companies.map((c) => { const v = companyView(c); return [c.name, CO_KIND[c.kind], own(c.owner), n(c.salary), n(c.dividends), c.sbd_hours ? 'yes' : 'no', Math.round(v.y.revenue), Math.round(v.y.expenses), v.y.corpTax ? Math.round(v.y.corpTax.total) : null, Math.round(v.pocket)]; })] },
-      { name: 'Company lines', rows: [['Company', 'Description', 'Category', 'Type', 'Amount', 'Frequency', 'Deductible %'],
-        ...S.company_items.map((i) => [(S.companies.find((c) => c.id === i.company_id) || {}).name, i.name, L(i.grp), i.kind === 'income' ? 'Income' : 'Expense', n(i.amount), (FREQS[i.freq] || {}).label, n(i.deductible_pct)])] },
+      { name: 'Business expenses', rows: [['Person', 'Date', 'Description', 'Category', 'Amount', 'Repeats', 'Last payment', 'Deductible %', 'Note'],
+        ...S.business.map((e) => [own(e.owner), e.spend_date, e.label, L(e.grp), n(e.amount), BIZ_FREQS[e.freq || 'once'], e.end_date, n(e.deductible_pct), e.note])] },
       { name: 'TFSA-RRSP room', rows: [['Person', 'Plan', 'Year', 'Type', 'Amount', 'Date', 'Note'],
         ...S.contributions.map((c) => [own(c.owner), PLAN_LABEL[c.plan] || c.plan, n(c.year), { room: 'Room', contribution: 'Contribution', withdrawal: 'Withdrawal' }[c.kind], n(c.amount), c.entry_date, c.note])] },
       { name: 'Net worth history', rows: [['Date', 'Investments', 'Other assets', 'Debts', 'Net worth'],
