@@ -144,13 +144,14 @@
   }
 
   let toastTimer;
-  function toast(msg, err) {
+  function toast(msg, err, action) {
     const el = $('#toast');
-    el.textContent = msg;
+    el.replaceChildren(msg, action ? h('button', { class: 'toast-action', type: 'button', text: action.label,
+      onclick: () => { el.hidden = true; action.fn(); } }) : '');
     el.className = 'toast' + (err ? ' err' : '');
     el.hidden = false;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { el.hidden = true; }, err ? 6000 : 2500);
+    toastTimer = setTimeout(() => { el.hidden = true; }, err || action ? 6000 : 2500);
   }
   function errText(e) {
     const m = (e && (e.message || e.error_description)) || String(e);
@@ -215,14 +216,114 @@
     render();
   }
 
+  // ---------------------------------------------------------------------------
+  // Saving, with undo
+  // ---------------------------------------------------------------------------
+  // Every change goes through saveRow / insertRows / deleteRows / saveSettings, which note how to put things back.
+  // undoable() groups the changes of one action (a form, an import, a quick delete) into one step of the Undo button.
+  // The steps live in this tab only: reloading the page starts a new list.
+  const TABLE_KEY = { holdings: 'holdings', assets: 'assets', debts: 'debts', budget_items: 'budget', children: 'children', resp_entries: 'resp',
+    projects: 'projects', expense_log: 'log', companies: 'companies', company_items: 'company_items', transactions: 'transactions', contributions: 'contributions' };
+  const LINK_FIELDS = ['child_id', 'project_id', 'company_id', 'holding_id'];
+  const UNDO_MAX = 30;
+  const undoStack = [];
+  let undoOps = null;
+  const loadedRow = (table, id) => (S[TABLE_KEY[table]] || []).find((r) => r.id === id);
+  const pick = (row, keys) => Object.fromEntries(keys.filter((k) => k in row).map((k) => [k, row[k]]));
+
+  function noteUndo(op, label = 'last change') {
+    if (undoOps) { undoOps.push(op); return; }
+    pushUndo(label, [op]);
+  }
+  function pushUndo(label, ops) {
+    undoStack.push({ label, ops });
+    if (undoStack.length > UNDO_MAX) undoStack.shift();
+  }
+  async function undoable(label, fn) {
+    if (undoOps) return fn(); // already inside an action
+    undoOps = [];
+    try { return await fn(); } finally {
+      const ops = undoOps;
+      undoOps = null;
+      if (ops.length) pushUndo(label, ops);
+    }
+  }
+
   async function saveRow(table, row) {
     const { id, ...rest } = row;
-    const res = id ? await sb.from(table).update(rest).eq('id', id) : await sb.from(table).insert(rest);
-    if (res.error) throw res.error;
+    if (id) {
+      const before = loadedRow(table, id);
+      const res = await sb.from(table).update(rest).eq('id', id);
+      if (res.error) throw res.error;
+      if (before) noteUndo({ t: 'update', table, id, before: pick(before, Object.keys(rest)) });
+    } else {
+      await insertRows(table, [rest]);
+    }
   }
-  async function deleteRow(table, id) {
-    const res = await sb.from(table).delete().eq('id', id);
+  async function insertRows(table, rows) {
+    const res = await sb.from(table).insert(rows).select();
     if (res.error) throw res.error;
+    const made = Array.isArray(res.data) ? res.data : res.data ? [res.data] : [];
+    if (made.length) noteUndo({ t: 'insert', table, ids: made.map((r) => r.id) });
+    return made;
+  }
+  async function deleteRow(table, id) { return deleteRows(table, [id]); }
+  async function deleteRows(table, ids) {
+    const rows = ids.map((id) => loadedRow(table, id)).filter(Boolean);
+    // Rows that point to these ones (an RESP entry to its child, a holding to its project) lose them in the database;
+    // keep a copy so Undo can put them back.
+    const gone = new Set(ids);
+    const linked = [];
+    for (const [t, key] of Object.entries(TABLE_KEY)) {
+      for (const r of S[key] || []) if (LINK_FIELDS.some((f) => r[f] && gone.has(r[f]))) linked.push([t, r]);
+    }
+    const res = await sb.from(table).delete().in('id', ids);
+    if (res.error) throw res.error;
+    if (rows.length) noteUndo({ t: 'delete', table, rows, linked });
+  }
+  async function saveSettings(upd) {
+    const before = pick(S.settings, Object.keys(upd));
+    const res = await sb.from('settings').update(upd).eq('id', 1);
+    if (res.error) throw res.error;
+    noteUndo({ t: 'settings', before });
+  }
+
+  async function reverse(op) {
+    const check = (res) => { if (res.error) throw res.error; };
+    if (op.t === 'insert') check(await sb.from(op.table).delete().in('id', op.ids));
+    else if (op.t === 'update') check(await sb.from(op.table).update(op.before).eq('id', op.id));
+    else if (op.t === 'settings') check(await sb.from('settings').update(op.before).eq('id', 1));
+    else if (op.t === 'delete') {
+      check(await sb.from(op.table).upsert(op.rows));
+      const byTable = new Map();
+      for (const [t, r] of op.linked) byTable.set(t, [...(byTable.get(t) || []), r]);
+      for (const [t, rows] of byTable) check(await sb.from(t).upsert(rows));
+    }
+  }
+  let undoing = false;
+  async function undoLast() {
+    if (undoing || !undoStack.length) return;
+    undoing = true;
+    const step = undoStack.pop();
+    clearTimeout(projSaveTimer); // a projection edit still waiting to be saved would come back otherwise
+    try {
+      for (const op of [...step.ops].reverse()) await reverse(op);
+      toast(`Undone: ${step.label}`);
+    } catch (e) {
+      toast(errText(e), true);
+    }
+    undoing = false;
+    refresh();
+  }
+  /** Deletes a row from a list (the × button), with Undo in the message instead of a confirmation. */
+  async function quickDelete(table, row, what) {
+    try {
+      await undoable(`delete “${what}”`, () => deleteRow(table, row.id));
+      toast(`Deleted “${what}”`, false, { label: 'Undo', fn: undoLast });
+    } catch (e) {
+      toast(errText(e), true);
+    }
+    refresh();
   }
 
   // ---------------------------------------------------------------------------
@@ -367,6 +468,10 @@
       h('div', null, h('h1', { text: 'Household finances' }), h('p', { class: 'sub', text: parts.join(' · ') || 'Prices update every trading evening.' })),
       h('div', { class: 'top-actions' },
         S.loaded && !S.denied && !S.loadError ? who : null,
+        S.loaded && !S.denied && !S.loadError ? h('button', {
+          class: 'btn ghost', type: 'button', onclick: undoLast, disabled: !undoStack.length,
+          title: undoStack.length ? `Undo: ${undoStack.at(-1).label} (Ctrl+Z)` : 'Nothing to undo yet', text: '↶ Undo',
+        }) : null,
         S.loaded && !S.denied && !S.loadError ? h('button', { class: 'btn ghost', type: 'button', onclick: exportAll, text: 'Export', title: 'All the data in one Excel file' }) : null,
         S.loaded && !S.denied ? h('button', { class: 'btn ghost', type: 'button', onclick: openSettings, text: 'Settings' }) : null,
         h('button', { class: 'btn ghost', type: 'button', onclick: () => sb.auth.signOut(), text: 'Sign out' })));
@@ -403,6 +508,14 @@
       body);
   }
   const addBtn = (label, fn) => h('button', { class: 'btn primary', type: 'button', onclick: fn, text: label });
+  /** The small × that deletes a row or a card at once (Undo brings it back). */
+  const xBtn = (table, row, what) => h('button', {
+    class: 'x-btn', type: 'button', text: '×', title: `Delete “${what}”`, 'aria-label': `Delete ${what}`,
+    onclick: (e) => { e.stopPropagation(); e.currentTarget.disabled = true; quickDelete(table, row, what); },
+    onkeydown: (e) => e.stopPropagation(), // Enter on the button must not also open the row
+  });
+  const xCell = (table, row, what) => h('td', { class: 'x' }, xBtn(table, row, what));
+  const xHead = () => h('th', { class: 'x' });
 
   function bars(entries, total, variant) {
     if (!entries.length) return h('p', { class: 'footnote', text: 'Nothing to show yet.' });
@@ -473,7 +586,7 @@
     // On a phone: name, market value and gain (plus the price for listed titles).
     const holdingHead = (first, priceSm = true) => h('thead', null, h('tr', null, h('th', { text: first }),
       h('th', { class: 'r hide-sm', text: 'Quantity' }), h('th', { class: 'r hide-sm', text: 'Average cost' }), h('th', { class: priceSm ? 'r' : 'r hide-sm', text: 'Price' }),
-      h('th', { class: 'r hide-sm', text: 'Book value' }), h('th', { class: 'r', text: 'Market value' }), h('th', { class: 'r', text: 'Capital gain' })));
+      h('th', { class: 'r hide-sm', text: 'Book value' }), h('th', { class: 'r', text: 'Market value' }), h('th', { class: 'r', text: 'Capital gain' }), xHead()));
     const holdingCells = (r, priceNote, priceSm = true) => {
       const hd = r.h;
       const cash = hd.market === 'CASH';
@@ -502,7 +615,7 @@
           ' ', hd.currency === 'USD' ? h('span', { class: 'pill info', text: 'USD' }) : null,
           hd.market === 'CASH' && num(hd.qty) < 0 ? h('span', { class: 'pill warn', text: 'margin' }) : null,
           h('span', { class: 'sub', text: [L(hd.name), L(hd.account), ownerName(hd.owner) + (r.f < 1 ? ' (50%)' : '')].filter(Boolean).join(' · ') })),
-        ...holdingCells(r, priceNote));
+        ...holdingCells(r, priceNote), xCell('holdings', hd, hd.market === 'CASH' ? `cash · ${L(hd.account)}` : hd.symbol.toUpperCase()));
     });
     const pubLink = !!S.settings.public_sheet_url;
     root.append(card('Public investments', pub.length ? `${pub.length} position(s) · ${money(sum(pub))} · closing prices updated every trading evening` : 'Stocks, ETFs and cash: the price updates every trading evening.',
@@ -511,7 +624,7 @@
       pub.length ? h('div', { class: 'table-wrap' }, h('table', null,
         holdingHead('Security'),
         h('tbody', null, pubBody))) : h('p', { class: 'footnote', text: 'No public investments. Import a statement from your broker (Excel or CSV) or add securities one by one.' }),
-      pub.length ? h('p', { class: 'footnote', text: 'Click a row to edit it. Average cost and price in the security’s currency; values and gains in CAD. The cost of USD securities is converted at today’s rate; for tax, the adjusted cost base uses the rate on the purchase date.' }) : null));
+      pub.length ? h('p', { class: 'footnote', text: 'Click a row to edit it, or × to delete it (Undo brings it back). Average cost and price in the security’s currency; values and gains in CAD. The cost of USD securities is converted at today’s rate; for tax, the adjusted cost base uses the rate on the purchase date.' }) : null));
 
     const privBody = priv.map((r) => {
       const hd = r.h;
@@ -521,7 +634,8 @@
           h('strong', { text: hd.name || hd.symbol }), ' ', hd.currency === 'USD' ? h('span', { class: 'pill info', text: 'USD' }) : null,
           late ? h('span', { class: 'pill warn', text: 'needs update' }) : null,
           h('span', { class: 'sub', text: [L(hd.account), ownerName(hd.owner) + (r.f < 1 ? ' (50%)' : ''), hd.institution, FREQ_LABEL[hd.update_freq]].filter(Boolean).join(' · ') })),
-        ...holdingCells(r, r.src === 'manual' ? (r.date ? 'as of ' + fmtDate(r.date) : '') : h('span', { class: 'pill warn', text: 'at cost' }), false));
+        ...holdingCells(r, r.src === 'manual' ? (r.date ? 'as of ' + fmtDate(r.date) : '') : h('span', { class: 'pill warn', text: 'at cost' }), false),
+        xCell('holdings', hd, hd.name || hd.symbol));
     });
     const privLink = !!S.settings.private_sheet_url;
     root.append(card('Private investments', priv.length ? `${priv.length} investment(s) · ${money(sum(priv))} · value entered by hand or imported` : 'Private funds, shares of a company, private loans, real estate units… updated every month or quarter.',
@@ -598,8 +712,7 @@
         const clean = Object.fromEntries(Object.keys(CLASSES).map((k) => [k, out[k] || 0]));
         const sum = Object.values(clean).reduce((a, b) => a + b, 0);
         if (Math.abs(sum - 100) > 0.5) throw new Error(`The total must be 100% (now ${fmtYears.format(sum)}%).`);
-        const res = await sb.from('settings').update({ allocation_targets: clean }).eq('id', 1);
-        if (res.error) throw res.error;
+        await saveSettings({ allocation_targets: clean });
       },
     });
   }
@@ -627,7 +740,8 @@
       h('td', null, `${kindLabel[t.kind]} ${t.symbol}`, h('span', { class: 'sub', text: [L(t.account), ownerName(t.owner), fmtDate(t.trade_date)].filter(Boolean).join(' · ') })),
       h('td', { class: 'r' }, `${fmtQty.format(num(t.qty))} × ${native(num(t.price), t.currency)}`, h('span', { class: 'sub', text: num(t.fees) ? `fees ${native(num(t.fees), t.currency)}` : '' })),
       h('td', { class: 'r ' + (t.kind === 'sell' ? cls(num(t.realized_gain)) : '') }, t.kind === 'sell' ? moneySigned(num(t.realized_gain)) : '—',
-        h('span', { class: 'sub', text: t.kind === 'sell' ? (TAX_SHELTERED.includes(t.account) ? 'sheltered' : t.account === 'Société' ? 'in the company' : 'taxable') : '' }))));
+        h('span', { class: 'sub', text: t.kind === 'sell' ? (TAX_SHELTERED.includes(t.account) ? 'sheltered' : t.account === 'Société' ? 'in the company' : 'taxable') : '' })),
+      xCell('transactions', t, `${kindLabel[t.kind]} ${t.symbol}`)));
     return card('Trades and realized gains', 'A buy or a sell updates the quantity and average cost of the investment', [addBtn('Buy or sell', () => openTrade())],
       h('div', { class: 'kpis' },
         kpi(`Taxable gains ${year}`, h('span', { class: cls(cur.taxable), text: moneySigned(cur.taxable) }), cur.taxable > 0 ? `${money(cur.taxable * INCLUSION)} to report (50%)` : 'non-registered accounts'),
@@ -635,7 +749,7 @@
         cur.company ? kpi('In the company', moneySigned(cur.company), 'taxed in the company') : null,
         [...byYear.keys()].filter((y) => y !== year).length ? kpi('Previous years', moneySigned([...byYear.entries()].filter(([y]) => y !== year).reduce((a, [, e]) => a + e.taxable, 0)), 'taxable gains') : null),
       list.length ? h('div', { class: 'table-wrap' }, h('table', null,
-        h('thead', null, h('tr', null, h('th', { text: 'Trade' }), h('th', { class: 'r', text: 'Quantity × price' }), h('th', { class: 'r', text: 'Realized gain' }))),
+        h('thead', null, h('tr', null, h('th', { text: 'Trade' }), h('th', { class: 'r', text: 'Quantity × price' }), h('th', { class: 'r', text: 'Realized gain' }), xHead())),
         h('tbody', null, list))) : h('p', { class: 'footnote', text: 'No trades. Sells work out the gain or loss from the average cost (adjusted cost base).' }),
       h('p', { class: 'footnote', text: 'Gain = sale proceeds minus fees, minus average cost × quantity sold. USD securities: converted at the rate on the trade date (approximate: for tax, the cost uses the rate of each purchase). Watch out for superficial losses (buying back within 30 days). Your broker’s slip (T5008) is the official figure.' }));
   }
@@ -689,9 +803,7 @@
         if (!hd) {
           const row = { market: out.market, symbol: out.symbol, currency, qty, avg_cost: (qty * price + fees) / qty, account: out.account, owner: out.owner };
           if (out.market === 'MANUAL') { row.manual_price = price; row.manual_price_date = base.trade_date; }
-          const r = await sb.from('holdings').insert(row).select();
-          if (r.error) throw r.error;
-          const created = Array.isArray(r.data) ? r.data[0] : r.data;
+          const [created] = await insertRows('holdings', [row]);
           await saveRow('transactions', { ...base, holding_id: created ? created.id : null, symbol: out.symbol, account: out.account, owner: out.owner });
           return;
         }
@@ -755,7 +867,8 @@
       people.length ? h('div', { class: 'rooms' }, people.flatMap((p) => [block(p, 'CELI'), block(p, 'REER')])) : h('p', { class: 'footnote', text: 'Pick a person at the top to see their room.' }),
       recent.length ? h('div', { class: 'table-wrap' }, h('table', null, h('tbody', null, recent.map((c) => clickRow(() => openContribution(c),
         h('td', null, `${PLAN_LABEL[c.plan]} ${kindLabel[c.kind].toLowerCase()}`, h('span', { class: 'sub', text: `${ownerName(c.owner)} · year ${c.year}${c.note ? ' · ' + c.note : ''}` })),
-        h('td', { class: 'r' }, (c.kind === 'withdrawal' ? '− ' : '') + money(num(c.amount)), h('span', { class: 'sub', text: fmtDate(c.entry_date) }))))))) : null,
+        h('td', { class: 'r' }, (c.kind === 'withdrawal' ? '− ' : '') + money(num(c.amount)), h('span', { class: 'sub', text: fmtDate(c.entry_date) })),
+        xCell('contributions', c, `${PLAN_LABEL[c.plan]} ${kindLabel[c.kind].toLowerCase()} ${money(num(c.amount))}`)))))) : null,
       h('p', { class: 'footnote', text: `RRSP: a contribution made in the first 60 days of the year can count for the year before (pick the year in the form); a $2,000 over-contribution is allowed. TFSA: a withdrawal gives the room back only on the next January 1. New TFSA room ${year}: ${money(T().PARAMS.tfsaLimit)}; RRSP limit ${year}: ${money(T().PARAMS.rrspLimit)}.` }));
   }
 
@@ -827,11 +940,12 @@
       h('tr', { class: 'click', tabindex: '0', onclick: () => openAsset(a), onkeydown: (e) => { if (e.key === 'Enter') openAsset(a); } },
         h('td', null, a.name, h('span', { class: 'sub', text: `${L(a.kind)} · ${ownerName(a.owner)}${sh(a.owner) < 1 ? ' (50%)' : ''}` })),
         h('td', { class: 'r hide-sm', text: fmtDate(a.as_of) }),
-        h('td', { class: 'r', text: money(num(a.value) * sh(a.owner)) })));
+        h('td', { class: 'r', text: money(num(a.value) * sh(a.owner)) }),
+        xCell('assets', a, a.name)));
     root.append(card('Other assets', 'House, bank accounts, vehicles… Update the value from time to time.', [addBtn('Add an asset', () => openAsset())],
       rows.length
         ? h('div', { class: 'table-wrap' }, h('table', null,
-          h('thead', null, h('tr', null, h('th', { text: 'Asset' }), h('th', { class: 'r hide-sm', text: 'Value as of' }), h('th', { class: 'r', text: 'Value' }))),
+          h('thead', null, h('tr', null, h('th', { text: 'Asset' }), h('th', { class: 'r hide-sm', text: 'Value as of' }), h('th', { class: 'r', text: 'Value' }), xHead())),
           h('tbody', null, rows)))
         : h('p', { class: 'footnote', text: 'No other assets entered. Investments are already counted in the Portfolio tab.' })));
     return root;
@@ -995,8 +1109,7 @@
     const toggle = h('label', { class: 'switch' },
       h('input', { type: 'checkbox', id: 'include-debts', checked: S.settings.include_debt_payments ? true : null,
         onchange: async (e) => {
-          const res = await sb.from('settings').update({ include_debt_payments: e.target.checked }).eq('id', 1);
-          if (res.error) return toast(errText(res.error), true);
+          try { await saveSettings({ include_debt_payments: e.target.checked }); } catch (err) { return toast(errText(err), true); }
           refresh();
         } }),
       'Include payments from the Debts tab');
@@ -1012,12 +1125,13 @@
     const groups = [...b.byGroup.entries()].sort((x, y) => y[1] - x[1]);
     root.append(card('Where the money goes', 'Fixed expenses, variable envelopes and debt payments, per month.', null, bars(groups, b.exp)));
 
-    const head = (title) => h('thead', null, h('tr', null, h('th', { text: title }), h('th', { class: 'r hide-sm', text: 'Amount' }), h('th', { class: 'r', text: 'Per month' })));
+    const head = (title) => h('thead', null, h('tr', null, h('th', { text: title }), h('th', { class: 'r hide-sm', text: 'Amount' }), h('th', { class: 'r', text: 'Per month' }), xHead()));
     const line = (r) => clickRow(() => openBudget(r.b),
       h('td', null, r.b.name, h('span', { class: 'sub', text: [r.b.child_id ? childName(r.b.child_id) : null, L(r.b.grp), ownerNote(r.b.owner, r.f)].filter(Boolean).join(' · ') })),
       h('td', { class: 'r hide-sm' }, native(num(r.b.amount), 'CAD'), h('span', { class: 'sub', text: (FREQS[r.b.freq] || FREQS.monthly).label + (isGross(r.b) ? ' · gross' : '') })),
-      h('td', { class: 'r', text: money(r.m * r.f) }));
-    const total = (v) => h('tfoot', null, h('tr', null, h('td', { text: 'Total' }), h('td', { class: 'hide-sm' }), h('td', { class: 'r', text: money(v) })));
+      h('td', { class: 'r', text: money(r.m * r.f) }),
+      xCell('budget_items', r.b, r.b.name));
+    const total = (v) => h('tfoot', null, h('tr', null, h('td', { text: 'Total' }), h('td', { class: 'hide-sm' }), h('td', { class: 'r', text: money(v) }), h('td', { class: 'x' })));
     const importBtn = h('button', { class: 'btn', type: 'button', onclick: openImport, text: 'Import statements' });
 
     root.append(card('Income', null, [addBtn('Add income', () => openBudget({ kind: 'income' }))],
@@ -1031,7 +1145,7 @@
     const fixedRows = [...b.fixed].sort((x, y) => L(x.b.grp).localeCompare(L(y.b.grp), 'en') || y.m - x.m).map(line);
     const debtRows = b.debtLines.map((d) => h('tr', null,
       h('td', null, d.name, h('span', { class: 'sub' }, 'Debt payments · ', h('span', { class: 'pill info', text: 'auto' }))),
-      h('td', { class: 'r hide-sm', text: '—' }), h('td', { class: 'r', text: money(d.m) })));
+      h('td', { class: 'r hide-sm', text: '—' }), h('td', { class: 'r', text: money(d.m) }), h('td', { class: 'x' })));
     root.append(card('Fixed expenses', 'What comes back every month: rent, electricity, Internet, insurance… Children’s expenses go in the Children tab.',
       [importBtn, addBtn('Add', () => openBudget({ kind: 'expense', nature: 'fixed' }))],
       fixedRows.length || debtRows.length
@@ -1058,13 +1172,15 @@
         h('td', null, L(g), p ? null : h('span', { class: 'sub' }, h('span', { class: 'pill warn', text: 'not budgeted' }))),
         h('td', { class: 'r', text: p ? money(p) : '—' }),
         h('td', { class: 'r' + (over ? ' down' : '') }, money(spent), p ? h('span', { class: 'sub', text: fmtPct.format(spent / p) }) : null),
-        h('td', { class: 'r hide-sm' }, money(ytdS), h('span', { class: 'sub', text: ytdP ? 'of ' + money(ytdP) : '' })));
+        h('td', { class: 'r hide-sm' }, money(ytdS), h('span', { class: 'sub', text: ytdP ? 'of ' + money(ytdP) : '' })),
+        env ? xCell('budget_items', env.b, `${L(g)} envelope`) : h('td', { class: 'x' }));
     });
     const childSpent = [...lv.monthByGrp.entries()].filter(([g]) => isChildGroup(g)).reduce((a, [, v]) => a + v, 0);
     const monthTotal = [...lv.monthByGrp.values()].reduce((a, v) => a + v, 0);
     const entries = lv.inMonth.map(({ e, f }) => clickRow(() => openExpense(e),
       h('td', null, e.label, h('span', { class: 'sub', text: [fmtDate(e.spend_date, { day: 'numeric', month: 'short' }), L(e.grp), e.child_id ? childName(e.child_id) : null, ownerNote(e.owner, f)].filter(Boolean).join(' · ') })),
-      h('td', { class: 'r', text: money(num(e.amount) * f) })));
+      h('td', { class: 'r', text: money(num(e.amount) * f) }),
+      xCell('expense_log', e, e.label)));
     const nav = h('div', { class: 'seg', role: 'group', 'aria-label': 'Month' },
       h('button', { type: 'button', 'aria-label': 'Previous month', onclick: () => { S.month = shiftMonth(S.month, -1); render(); }, text: '‹' }),
       h('button', { type: 'button', 'aria-pressed': 'true', text: monthLabel(S.month) }),
@@ -1074,7 +1190,7 @@
         addBtn('Note an expense', () => openExpense())],
       rows.length
         ? h('div', { class: 'table-wrap' }, h('table', null,
-          h('thead', null, h('tr', null, h('th', { text: 'Envelope' }), h('th', { class: 'r', text: 'Planned / month' }), h('th', { class: 'r', text: 'Spent' }), h('th', { class: 'r hide-sm', text: 'Since January' }))),
+          h('thead', null, h('tr', null, h('th', { text: 'Envelope' }), h('th', { class: 'r', text: 'Planned / month' }), h('th', { class: 'r', text: 'Spent' }), h('th', { class: 'r hide-sm', text: 'Since January' }), xHead())),
           h('tbody', null, rows)))
         : h('p', { class: 'footnote', text: 'Create envelopes (e.g. Travel $300 / month) then note expenses as they happen.' }),
       h('h3', { class: 'subhead', text: `Expenses noted in ${monthLabel(S.month)}` + (monthTotal ? ` · ${money(monthTotal)}` : '') }),
@@ -1119,18 +1235,21 @@
 
       const fixedRows = fixed.map((r) => clickRow(() => openBudget(r.b),
         h('td', null, r.b.name, h('span', { class: 'sub', text: `${L(r.b.grp)} · ${(FREQS[r.b.freq] || FREQS.monthly).label}` })),
-        h('td', { class: 'r', text: money(r.m * r.f) })));
+        h('td', { class: 'r', text: money(r.m * r.f) }),
+        xCell('budget_items', r.b, r.b.name)));
       const logRows = logs.slice(0, 8).map((r) => clickRow(() => openExpense(r.e),
         h('td', null, r.e.label, h('span', { class: 'sub', text: `${fmtDate(r.e.spend_date, { day: 'numeric', month: 'short' })} · ${L(r.e.grp)}` })),
-        h('td', { class: 'r', text: money(num(r.e.amount) * r.f) })));
+        h('td', { class: 'r', text: money(num(r.e.amount) * r.f) }),
+        xCell('expense_log', r.e, r.e.label)));
       const respRows = [...entries].reverse().slice(0, 6).map((e) => clickRow(() => openResp(c, e),
         h('td', null, e.kind === 'opening' ? 'Starting balance' : 'Contribution', h('span', { class: 'sub', text: fmtDate(e.entry_date) + (e.note ? ' · ' + e.note : '') })),
-        h('td', { class: 'r' }, money(num(e.amount)), h('span', { class: 'sub', text: num(e.cesg) || num(e.iqee) ? `CESG ${money(num(e.cesg))} · QESI ${money(num(e.iqee))}` : '' }))));
+        h('td', { class: 'r' }, money(num(e.amount)), h('span', { class: 'sub', text: num(e.cesg) || num(e.iqee) ? `CESG ${money(num(e.cesg))} · QESI ${money(num(e.iqee))}` : '' })),
+        xCell('resp_entries', e, `RESP ${e.kind === 'opening' ? 'starting balance' : 'contribution'} ${money(num(e.amount))}`)));
 
       return h('article', { class: 'card child' },
         h('div', { class: 'card-head' },
           h('div', null, h('h2', { text: c.name }), h('p', { text: rs.age !== null ? `${rs.age} year${rs.age === 1 ? '' : 's'} old · born ${fmtDate(c.birth_date)}` : 'Birth date to add' })),
-          h('div', { class: 'actions' }, h('button', { class: 'btn ghost', type: 'button', onclick: () => openChild(c), text: 'Edit' }))),
+          h('div', { class: 'actions' }, h('button', { class: 'btn ghost', type: 'button', onclick: () => openChild(c), text: 'Edit' }), xBtn('children', c, c.name))),
         h('div', { class: 'kpis' },
           kpi('Recurring expenses', money(fixedM), 'per month'),
           kpi(`One-time expenses ${year}`, money(spentY)),
@@ -1164,7 +1283,8 @@
     if (shared.length) {
       root.append(card('For all children', 'Children’s expenses not tied to one child (often from an import).', null,
         h('div', { class: 'table-wrap' }, h('table', null, h('tbody', null, shared.map((b) => clickRow(() => openBudget(b),
-          h('td', null, b.name, h('span', { class: 'sub', text: L(b.grp) })), h('td', { class: 'r', text: money(C.monthly(b.amount, b.freq) * sh(b.owner)) }))))))));
+          h('td', null, b.name, h('span', { class: 'sub', text: L(b.grp) })), h('td', { class: 'r', text: money(C.monthly(b.amount, b.freq) * sh(b.owner)) }),
+          xCell('budget_items', b, b.name))))))));
     }
     root.append(h('div', { class: 'children' }, cards));
     root.append(h('p', { class: 'footnote', text: 'Basic grants under the 2025 rules: CESG 20% (max $500/year, $1,000 with catch-up, $7,200 lifetime) and QESI 10% (max $250/year, $500 with catch-up, $3,600 lifetime), until the year they turn 17. The additional CESG, the QESI supplement and the Canada Learning Bond, which depend on family income, are not calculated. Lifetime contribution limit: $50,000 per child.' }));
@@ -1210,7 +1330,7 @@
       return h('article', { class: 'debt' + (isMortgage ? ' wide' : '') },
         h('div', { class: 'debt-top' },
           h('div', null, h('h3', { text: d.name }), h('div', { class: 'sub', text: [DEBT_KINDS[d.kind], d.lender, ownerNote(d.owner, f)].filter(Boolean).join(' · ') })),
-          h('button', { class: 'btn ghost', type: 'button', onclick: () => openDebt(d), text: 'Edit' })),
+          h('div', { class: 'actions' }, h('button', { class: 'btn ghost', type: 'button', onclick: () => openDebt(d), text: 'Edit' }), xBtn('debts', d, d.name))),
         h('div', null, h('div', { class: 'big', text: money(num(d.balance) * f) }),
           h('div', { class: 'muted-caption', text: `Balance${d.balance_date ? ' as of ' + fmtDate(d.balance_date) : ''}` })),
         st.paidShare !== null ? h('div', null, h('div', { class: 'progress', role: 'progressbar', 'aria-valuenow': Math.round(st.paidShare * 100), 'aria-valuemin': 0, 'aria-valuemax': 100 }, h('div', { style: `width:${(st.paidShare * 100).toFixed(1)}%` })),
@@ -1277,7 +1397,7 @@
       return h('article', { class: 'card project' },
         h('div', { class: 'card-head' },
           h('div', null, h('h2', { text: p.name }), h('p', null, h('span', { class: 'pill ' + pc, text: pl }))),
-          h('div', { class: 'actions' }, h('button', { class: 'btn ghost', type: 'button', onclick: () => openProject(p), text: 'Edit' }))),
+          h('div', { class: 'actions' }, h('button', { class: 'btn ghost', type: 'button', onclick: () => openProject(p), text: 'Edit' }), xBtn('projects', p, p.name))),
         h('div', { class: 'big', text: `${money(current)} / ${money(st.target)}` }),
         st.share !== null ? h('div', { class: 'progress', role: 'progressbar', 'aria-valuenow': Math.round(st.share * 100), 'aria-valuemin': 0, 'aria-valuemax': 100 }, h('div', { style: `width:${(st.share * 100).toFixed(1)}%` })) : null,
         h('p', { class: 'project-line', text: line }),
@@ -1380,8 +1500,10 @@
         h('input', { id, inputmode: 'decimal', autocomplete: 'off', value: a[k] === null || a[k] === undefined ? '' : String(a[k]),
           onchange: (e) => {
             const v = parseNum(e.target.value);
-            const next = { ...(S.settings.projection || {}) };
+            const prev = S.settings.projection || {};
+            const next = { ...prev };
             if (v === null || Number.isNaN(v)) delete next[k]; else next[k] = v;
+            noteUndo({ t: 'settings', before: { projection: prev } }, 'projection assumption');
             S.settings = { ...S.settings, projection: next };
             const y = window.scrollY;
             render();
@@ -1552,7 +1674,8 @@
     const rows = [...lines].sort((a, b) => (a.kind === b.kind ? b.annual - a.annual : a.kind === 'income' ? -1 : 1)).map((l) => clickRow(() => openCompanyItem(c, l),
       h('td', null, l.name, h('span', { class: 'sub', text: L(l.grp) + (l.kind === 'expense' && l.deductiblePct < 100 ? ` · ${fmtYears.format(l.deductiblePct)}% deductible` : '') })),
       h('td', { class: 'r ' + (l.kind === 'income' ? 'up' : '') }, (l.kind === 'income' ? '' : '− ') + money(l.annual / 12), h('span', { class: 'sub', text: '/ month' })),
-      h('td', { class: 'r hide-sm' }, money(l.annual), h('span', { class: 'sub', text: '/ year' }))));
+      h('td', { class: 'r hide-sm' }, money(l.annual), h('span', { class: 'sub', text: '/ year' })),
+      xCell('company_items', l, l.name)));
 
     let compare = null;
     if (scenarios) {
@@ -1586,14 +1709,15 @@
         h('div', { class: 'actions' },
           h('button', { class: 'btn ghost', type: 'button', onclick: () => openCompany(c), text: 'Edit' }),
           h('button', { class: 'btn', type: 'button', onclick: () => openCompanyItem(c, { kind: 'expense' }), text: 'Expense' }),
-          addBtn('Income', () => openCompanyItem(c, { kind: 'income' })))),
+          addBtn('Income', () => openCompanyItem(c, { kind: 'income' })),
+          xBtn('companies', c, c.name))),
       h('div', { class: 'grid tight' },
         h('div', null, h('h3', { class: 'subhead', text: inc ? 'In the company (per year)' : 'Per year' }), h('dl', { class: 'facts' }, flow)),
         h('div', null, h('h3', { class: 'subhead', text: 'For you' }), h('dl', { class: 'facts' }, personalFacts),
           h('div', { class: 'card-actions' }, syncBtn),
           h('p', { class: 'footnote', text: 'The Budget and Projections use this net amount. Update it when the numbers change.' }))),
       lines.length ? h('div', null, h('h3', { class: 'subhead', text: 'Income and expenses' }), h('div', { class: 'table-wrap' }, h('table', null,
-        h('thead', null, h('tr', null, h('th', { text: 'Line' }), h('th', { class: 'r', text: 'Per month' }), h('th', { class: 'r hide-sm', text: 'Per year' }))),
+        h('thead', null, h('tr', null, h('th', { text: 'Line' }), h('th', { class: 'r', text: 'Per month' }), h('th', { class: 'r hide-sm', text: 'Per year' }), xHead())),
         h('tbody', null, rows))))
         : h('p', { class: 'footnote', text: 'Add the company’s income (sales, fees) and expenses (rent, supplies, software…).' }),
       compare);
@@ -1656,8 +1780,7 @@
         { k: 'cnesst', label: 'Company’s CNESST rate (%)', type: 'num', hint: 'On your CNESST notice of assessment; depends on the industry' },
       ],
       onSave: async (out) => {
-        const res = await sb.from('settings').update({ tax: { ...t, ...out } }).eq('id', 1);
-        if (res.error) throw res.error;
+        await saveSettings({ tax: { ...t, ...out } });
       },
     });
   }
@@ -1716,7 +1839,10 @@
         onclick: async () => {
           if (!armed) { armed = true; delBtn.classList.add('armed'); delBtn.textContent = 'Confirm delete'; return; }
           delBtn.disabled = true;
-          try { await onDelete(); close(); toast('Deleted'); refresh(); } catch (e) { errorBox.textContent = errText(e); delBtn.disabled = false; }
+          try {
+            await undoable(`delete (${title})`, onDelete);
+            close(); toast('Deleted', false, { label: 'Undo', fn: undoLast }); refresh();
+          } catch (e) { errorBox.textContent = errText(e); delBtn.disabled = false; refresh(); }
         },
       });
     }
@@ -1744,9 +1870,9 @@
       for (const f of fields) if (!visible(f) && f.clearWhenHidden) out[f.k] = null;
       saveBtn.disabled = true;
       try {
-        await onSave(out);
+        await undoable(title, () => onSave(out));
         close();
-        toast('Saved');
+        toast('Saved', false, undoStack.length ? { label: 'Undo', fn: undoLast } : null);
         refresh();
       } catch (err) {
         errorBox.textContent = errText(err);
@@ -2164,10 +2290,9 @@
         }
         if (!list.length) { err.textContent = 'Check at least one line.'; return; }
         addBtnEl.disabled = true;
-        const res = await sb.from('budget_items').insert(list);
-        if (res.error) { err.textContent = errText(res.error); addBtnEl.disabled = false; return; }
+        try { await undoable('statement import', () => insertRows('budget_items', list)); } catch (e) { err.textContent = errText(e); addBtnEl.disabled = false; return; }
         close();
-        toast(`${list.length} line(s) added to the budget`);
+        toast(`${list.length} line(s) added to the budget`, false, { label: 'Undo', fn: undoLast });
         refresh();
       } });
       function updateCount() {
@@ -2434,22 +2559,25 @@
       }
       applyBtn.disabled = true;
       try {
-        if (inserts.length) { const r = await sb.from('holdings').insert(inserts); if (r.error) throw r.error; }
-        const results = await Promise.all(updates.map(([id, upd]) => sb.from('holdings').update(upd).eq('id', id)));
-        const bad = results.find((r) => r.error);
-        if (bad) throw bad.error;
-        if (st.remove.size) { const r = await sb.from('holdings').delete().in('id', [...st.remove]); if (r.error) throw r.error; }
-        if (st.fromLink && st.link !== (S.settings[linkKey] || '')) {
-          const r = await sb.from('settings').update({ [linkKey]: st.link }).eq('id', 1);
-          if (r.error) console.warn('Link not remembered:', r.error.message);
-        }
+        await undoable('investment import', async () => {
+          if (inserts.length) await insertRows('holdings', inserts);
+          const results = await Promise.allSettled(updates.map(([id, upd]) => saveRow('holdings', { id, ...upd })));
+          const bad = results.find((r) => r.status === 'rejected');
+          if (bad) throw bad.reason;
+          if (st.remove.size) await deleteRows('holdings', [...st.remove]);
+          if (st.fromLink && st.link !== (S.settings[linkKey] || '')) {
+            try { await saveSettings({ [linkKey]: st.link }); } catch (e) { console.warn('Link not remembered:', e.message); }
+          }
+        });
       } catch (e) {
         err.textContent = errText(e);
         applyBtn.disabled = false;
+        refresh();
         return;
       }
       close();
-      toast([inserts.length ? `${inserts.length} added` : '', updates.length ? `${updates.length} updated` : '', st.remove.size ? `${st.remove.size} removed` : ''].filter(Boolean).join(', '));
+      toast([inserts.length ? `${inserts.length} added` : '', updates.length ? `${updates.length} updated` : '', st.remove.size ? `${st.remove.size} removed` : ''].filter(Boolean).join(', '),
+        false, { label: 'Undo', fn: undoLast });
       refresh();
     }
 
@@ -2540,10 +2668,7 @@
           { k: 'private_sheet_url', label: 'Google Sheets link: private investments', type: 'text', wide: true, placeholder: 'None' },
         ] : []),
       ],
-      onSave: async (out) => {
-        const res = await sb.from('settings').update(out).eq('id', 1);
-        if (res.error) throw res.error;
-      },
+      onSave: (out) => saveSettings(out),
     });
   }
 
@@ -2603,13 +2728,21 @@
     sb.auth.onAuthStateChange((event, session) => {
       const was = S.session;
       S.session = session;
-      if (!session) { S.loaded = false; render(); }
+      if (!session) { S.loaded = false; undoStack.length = 0; render(); }
       else if (!was || (event === 'SIGNED_IN' && was.user.id !== session.user.id)) {
         S.loaded = false; render(); lastLoad = Date.now();
         setTimeout(refresh, 0); // never call Supabase from inside this callback (auth lock)
       }
     });
     if (S.session) { render(); lastLoad = Date.now(); await refresh(); } else render();
+    // Ctrl+Z / Cmd+Z undoes the last saved change, except while typing (the field undoes its own typing) or in a form.
+    document.addEventListener('keydown', (e) => {
+      if (e.key.toLowerCase() !== 'z' || !(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return;
+      if (e.target.closest && e.target.closest('input, textarea, select, [contenteditable]')) return;
+      if (!$('#sheet').hidden || !undoStack.length || !S.loaded) return;
+      e.preventDefault();
+      undoLast();
+    });
   }
   boot();
 })();

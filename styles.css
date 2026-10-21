@@ -193,6 +193,17 @@ td .sub { display: block; color: var(--muted); font-size: var(--fs-caption); }
 tfoot td { font-weight: 800; border-top: 2px solid var(--line); border-bottom: 0; }
 @media (max-width: 640px) { .hide-sm { display: none; } }
 
+/* The × that deletes a row or a card (Undo brings it back). */
+th.x, td.x { width: 1%; padding-left: 0; padding-right: 4px; text-align: right; }
+td.x { vertical-align: middle; }
+.x-btn {
+  width: 28px; height: 28px; border-radius: var(--r-pill); border: 0; background: transparent; color: var(--muted);
+  font: inherit; font-size: 1.2rem; line-height: 1; cursor: pointer; opacity: 0.55; flex: none;
+}
+.x-btn:hover, .x-btn:focus-visible { opacity: 1; color: var(--loss); background: var(--loss-soft); }
+.x-btn:disabled { opacity: 0.3; cursor: default; }
+.debt-top .actions { display: flex; gap: 4px; align-items: center; }
+
 /* Bars -------------------------------------------------------------------- */
 .bars { display: grid; gap: 10px; }
 .bar-row { display: grid; grid-template-columns: minmax(0, 9rem) minmax(0, 1fr) auto; gap: 10px; align-items: center; }
@@ -286,6 +297,10 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); border-bottom: 0
   font-weight: 700; font-size: var(--fs-caption); box-shadow: var(--shadow); max-width: calc(100% - 32px);
 }
 .toast.err { background: var(--loss); color: #fff; }
+.toast-action {
+  margin-left: 12px; padding: 2px 10px; border: 1px solid currentColor; border-radius: var(--r-pill);
+  background: transparent; color: inherit; font: inherit; cursor: pointer;
+}
 
 @media (prefers-reduced-motion: no-preference) {
   .sheet-panel { animation: rise 180ms ease-out; }
