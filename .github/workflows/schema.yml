@@ -1,0 +1,36 @@
+name: Update database schema
+
+# Runs supabase/schema.sql against the database whenever it changes on main,
+# so nobody has to paste it into the Supabase SQL Editor. The file is safe to
+# run again: it only adds what is missing.
+on:
+  push:
+    branches: [main]
+    paths: [supabase/schema.sql]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: schema
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run supabase/schema.sql
+        env:
+          # Supabase → Connect → "Session pooler" connection string, with the database password in it.
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::Add the SUPABASE_DB_URL repository secret (Supabase → Connect → Session pooler). See INSTALLATION.md."
+            exit 1
+          fi
+          # All or nothing: if one statement fails, nothing is changed.
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction -q -f supabase/schema.sql
+          echo "Schema is up to date."

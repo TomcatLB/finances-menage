@@ -136,7 +136,18 @@ L'app est faite pour être modifiée avec Claude : le fichier `CLAUDE.md` lui ex
 2. **File → Clone repository**, choisissez `finances-menage`. Comme dossier, prenez votre dossier personnel (par exemple `/Users/votre-nom/finances-menage`), **pas** le Bureau ni Documents : macOS y bloque certains outils.
 3. Dans l'app **Claude** (onglet Code), ouvrez ce dossier et demandez ce que vous voulez, en français. Claude essaie le changement dans la page de test, lance les vérifications, puis vous montre le résultat.
 4. Quand c'est bon, demandez à Claude de faire le commit, puis cliquez **Push origin** dans GitHub Desktop. Votre site se met à jour en une ou deux minutes.
-5. Si Claude ajoute une table ou une colonne à la base de données, il vous le dira : relancez alors `supabase/schema.sql` dans Supabase (étape 2), avec vos deux courriels.
+5. Si Claude ajoute une table ou une colonne à la base de données, il vous le dira : relancez alors `supabase/schema.sql` dans Supabase (étape 2), ou laissez l'action GitHub le faire (section suivante).
+
+## Mettre la base de données à jour automatiquement
+
+Pour ne plus jamais coller `schema.sql` dans Supabase :
+
+1. Dans Supabase, cliquez **Connect** (en haut du projet), choisissez **Session pooler** et copiez l'adresse (elle commence par `postgresql://postgres.`).
+2. Remplacez `[YOUR-PASSWORD]` dans cette adresse par le mot de passe de la base de données (celui de l'étape 1; sinon **Project Settings → Database → Reset database password**).
+3. Dans GitHub : **Settings → Secrets and variables → Actions → New repository secret**. Nom : `SUPABASE_DB_URL`. Valeur : l'adresse complète. **Add secret**.
+4. Onglet **Actions → Update database schema → Run workflow** pour l'essayer. Un crochet vert : c'est fait.
+
+Ensuite, chaque fois que `schema.sql` change, GitHub le relance tout seul. Vos données restent : le fichier ajoute seulement ce qui manque. Les courriels d'exemple du fichier ne sont jamais ajoutés.
 
 ## Recevoir une nouvelle version
 
