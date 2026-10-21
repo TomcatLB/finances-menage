@@ -10,6 +10,7 @@ Household finance dashboard for a couple in Québec. Static site (GitHub Pages) 
 - `importer.js` — bank CSV and PDF statement parsing (RBC first; small built-in PDF text reader) and recurring-expense detection; portfolio import (small built-in .xlsx reader, Google Sheets CSV links, column detection, sync with saved holdings); `.xlsx` writer for the Excel export. No third-party spreadsheet library.
 - `supabase/schema.sql` — idempotent: tables, `alter … add column if not exists` for upgrades, RLS limited to `allowed_users`.
 - `scripts/update_prices.py` — daily job: Yahoo closes via yfinance, USD/CAD from Bank of Canada Valet, then a net-worth snapshot. `scripts/reminders.py` runs after it and keeps one GitHub issue labelled `rappels` (GitHub emails the owner).
+- `.github/workflows/schema.yml` runs `schema.sql` on the database when it changes on main; `backup.yml` saves every table nightly as CSV in a `.7z` protected by the `BACKUP_PASSWORD` secret (Actions artifact, 90 days).
 - `dev.html` + `dev/fake-supabase.js` — **test mode**: the real page with made-up data kept in the browser tab; it never loads `config.js`. Use it to try every change.
 - `icons/`, `manifest.webmanifest` — home-screen icon (`python3 scripts/make_icons.py` redraws it; needs Pillow).
 

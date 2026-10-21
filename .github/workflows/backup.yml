@@ -1,0 +1,59 @@
+name: Back up the database
+
+# Every night: every table of the database as CSV files in one password-protected
+# .7z file, kept 90 days under Actions → this workflow → a run → Artifacts.
+# Opens with 7-Zip (Windows) or Keka (Mac) and the BACKUP_PASSWORD secret.
+# Supabase's free plan keeps no backups of its own.
+on:
+  schedule:
+    - cron: "15 7 * * *"   # 07:15 UTC = 3:15 (summer) or 2:15 (winter) in Montréal
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Export every table
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+          BACKUP_PASSWORD: ${{ secrets.BACKUP_PASSWORD }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::Add the SUPABASE_DB_URL repository secret (Supabase → Connect → Session pooler). See INSTALLATION.md."
+            exit 1
+          fi
+          if [ -z "$BACKUP_PASSWORD" ]; then
+            echo "::error::Add the BACKUP_PASSWORD repository secret (the password that will open the backup files). See INSTALLATION.md."
+            exit 1
+          fi
+          command -v 7z >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full; }
+          day=$(TZ=America/Toronto date +%F)
+          dir="$RUNNER_TEMP/backup-$day"
+          mkdir -p "$dir"
+          tables=$(psql "$DATABASE_URL" -At -v ON_ERROR_STOP=1 -c \
+            "select table_name from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE' order by 1")
+          [ -n "$tables" ] || { echo "::error::No tables found."; exit 1; }
+          for t in $tables; do
+            psql "$DATABASE_URL" -q -v ON_ERROR_STOP=1 -c "\\copy (select * from public.\"$t\") to '$dir/$t.csv' with (format csv, header)"
+            echo "$t: $(($(wc -l < "$dir/$t.csv") - 1)) rows"
+          done
+          # -mhe=on also hides the file names; the password never appears in the log (GitHub masks secrets).
+          (cd "$dir" && 7z a -t7z -mhe=on -p"$BACKUP_PASSWORD" "$RUNNER_TEMP/finances-backup-$day.7z" ./*.csv > /dev/null)
+          rm -rf "$dir"
+          echo "FILE=$RUNNER_TEMP/finances-backup-$day.7z" >> "$GITHUB_ENV"
+          echo "NAME=finances-backup-$day" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: ${{ env.FILE }}
+          retention-days: 90
+          compression-level: 0
+          if-no-files-found: error

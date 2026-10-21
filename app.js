@@ -226,7 +226,9 @@
     Object.keys(OPTIONAL_TABLES).forEach((k, i) => { S[k] = extra[i].data || []; });
     S.missing = new Set(Object.keys(OPTIONAL_TABLES).filter((k, i) => extra[i].error));
     // New columns in settings are the other sign of an older database.
-    S.outdated = extra.some((r) => r.error) || (st && !('projection' in st));
+    // companies / company_items only hold lines from the former Companies page: their absence is not an outdated schema.
+    const LEGACY = ['companies', 'company_items'];
+    S.outdated = Object.keys(OPTIONAL_TABLES).some((k, i) => extra[i].error && !LEGACY.includes(k)) || (st && !('projection' in st));
     S.loaded = true;
   }
 
@@ -1782,10 +1784,45 @@
           h('tfoot', null, h('tr', null, h('td', { text: 'Total' }), h('td', { class: 'r', text: money(total) }), h('td', { class: 'r hide-sm', text: money(deductible) }), h('td', { class: 'x' }))))))
         : h('p', { class: 'footnote', text: `No business expenses for ${ownerName(p)} in ${year}. Add marketing, client events, software, equipment… A subscription can repeat every month.` })));
 
+    if (year === new Date().getFullYear()) {
+      const aside = taxSetAsideCard(p, income, deductible);
+      if (aside) root.append(aside);
+    }
     const old = oldCompanyCard();
     if (old) root.append(old);
     root.append(h('p', { class: 'footnote', text: `Tax saved is a ${X.PARAMS.year} Québec + federal estimate: each person’s gross income entered in Budget, taxed with and without the deductible expenses (expenses above business income also lower tax on other income). The Budget’s after-tax income counts this year’s deductions. Not modelled: GST/QST, capital cost allowance (equipment is deducted at once here), home-office rules, credits. Check with your accountant.` }));
     return root;
+  }
+
+  const INSTALMENT_DATES = [[2, 15], [5, 15], [8, 15], [11, 15]]; // Mar 15, Jun 15, Sep 15, Dec 15 (month from 0)
+  const INSTALMENT_THRESHOLD = 1800; // each government, for Québec residents
+
+  /**
+   * Self-employment income has no tax withheld: what to put aside for the tax return and the quarterly instalments.
+   * Salary is assumed to be fully withheld at source by the employer; the rest is owed.
+   */
+  function taxSetAsideCard(p, income, deductible) {
+    if (!(income.selfEmployed > 0)) return null;
+    const X = T();
+    const full = X.personalTax({ ...income, selfEmployed: income.selfEmployed - deductible });
+    const withheld = income.employment > 0 ? X.personalTax({ employment: income.employment }) : { total: 0, federal: 0 };
+    const federal = Math.max(0, full.federal - withheld.federal);
+    const quebec = Math.max(0, (full.total - full.federal) - (withheld.total - withheld.federal));
+    const owed = federal + quebec;
+    if (owed <= 0) return null;
+    const today = new Date();
+    const y = today.getFullYear();
+    const dates = INSTALMENT_DATES.map(([m, d]) => new Date(y, m, d));
+    const next = dates.find((d) => d >= new Date(y, today.getMonth(), today.getDate())) || new Date(y + 1, 2, 15);
+    const instal = (federal > INSTALMENT_THRESHOLD ? federal : 0) + (quebec > INSTALMENT_THRESHOLD ? quebec : 0);
+    return card('Tax to set aside', `${ownerName(p)}’s ${y} self-employment income has no tax taken off: put this aside as it comes in`, null,
+      h('div', { class: 'kpis' },
+        kpi('Set aside each month', money(owed / 12), `${fmtPct.format(owed / income.selfEmployed)} of ${money(income.selfEmployed / 12)} self-employment income a month`),
+        kpi(`Owed for ${y} (estimate)`, money(owed), `federal ${money(federal)} · Québec ${money(quebec)} (tax, QPP, QPIP, HSF)`),
+        instal > 0
+          ? kpi('Next instalment', fmtDate(`${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, '0')}-${String(next.getDate()).padStart(2, '0')}`, { day: 'numeric', month: 'short', year: 'numeric' }), `about ${money(instal / 4)} (${[federal > INSTALMENT_THRESHOLD ? `CRA ${money(federal / 4)}` : null, quebec > INSTALMENT_THRESHOLD ? `Revenu Québec ${money(quebec / 4)}` : null].filter(Boolean).join(' + ')})`)
+          : kpi('Instalments', 'Probably none', `each government’s balance is under ${money(INSTALMENT_THRESHOLD)}: pay it all with the tax return by April 30`)),
+      h('p', { class: 'footnote', text: `From ${ownerName(p)}’s gross income in Budget, minus this year’s deductible business expenses; salary is assumed to have its tax withheld by the employer. Instalments are due March 15, June 15, September 15 and December 15 when the balance owing is over ${money(INSTALMENT_THRESHOLD)} (federal, or Québec) this year and in one of the two previous years; the reminders the CRA and Revenu Québec mail show the amounts they expect, and paying those amounts on time avoids interest. Not modelled: GST/QST, RRSP and other deductions, credits.` }));
   }
 
   function bizCategories(rows) {
