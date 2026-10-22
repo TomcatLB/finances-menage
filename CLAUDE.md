@@ -12,6 +12,7 @@ Household finance dashboard for a couple in Québec. Static site (GitHub Pages) 
 - `scripts/update_prices.py` — daily job: Yahoo closes via yfinance, USD/CAD from Bank of Canada Valet, then a net-worth snapshot. `scripts/reminders.py` runs after it and keeps one GitHub issue labelled `rappels` (GitHub emails the owner).
 - `.github/workflows/schema.yml` runs `schema.sql` on the database when it changes on main; `backup.yml` saves every table nightly as CSV in a `.7z` protected by the `BACKUP_PASSWORD` secret (Actions artifact, 90 days).
 - `dev.html` + `dev/fake-supabase.js` — **test mode**: the real page with made-up data kept in the browser tab; it never loads `config.js`. Use it to try every change.
+- `vendor/supabase-2.117.2.js` — the supabase-js UMD build, served from the site itself (not a CDN) so blockers or CDN outages can't stop the page. To upgrade, copy `dist/umd/supabase.js` from the npm package and update the `<script>` in `index.html`.
 - `icons/`, `manifest.webmanifest` — home-screen icon (`python3 scripts/make_icons.py` redraws it; needs Pillow).
 
 ## Rules
